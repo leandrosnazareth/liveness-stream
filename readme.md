@@ -1,69 +1,129 @@
-# Real-Time Multi-Face Liveness Detection (Anti-Spoofing) with Docker and NVIDIA CUDA
+# Real-Time Multi-Face Liveness Detection com Docker e NVIDIA CUDA
 
-Este projeto consiste em uma aplicação de Inteligência Artificial para Detecção de Vivacidade (Liveness Detection / Anti-Spoofing) operando em tempo real. O sistema é capaz de capturar o feed de vídeo da webcam do usuário através do navegador, processar múltiplos rostos simultaneamente utilizando aceleração por hardware (GPU dedicada) dentro de um container Docker e diferenciar se o rosto pertence a uma pessoa real ou a uma fraude (foto impressa ou tela de dispositivo).
+Este projeto e uma aplicacao de Inteligencia Artificial para deteccao de vivacidade
+(Liveness Detection / Anti-Spoofing) em tempo real. A aplicacao captura o feed da
+webcam pelo navegador, envia frames para uma API FastAPI, detecta multiplos rostos
+com InsightFace e classifica cada rosto como `REAL` ou `SPOOF / FOTO`.
 
 ## Funcionalidades
 
-- Detecção Multi-Rosto: Identifica e rastreia múltiplos rostos simultaneamente na cena.
-- Bounding Boxes em Tempo Real: Desenha quadros delimitadores coloridos diretamente ao redor de cada rosto detectado.
-- Análise de Liveness Independente: Avalia individualmente cada face, retornando a etiqueta REAL (borda verde) ou SPOOF / FOTO (borda vermelha).
-- Abordagem Híbrida Inteligente: Combina redes neurais profundas de mapeamento geométrico 3D (para validar profundidade volumétrica da face) com análise de textura nos canais de cores HSV (para identificar reflexos e saturação artificial de telas).
-- Processamento na GPU via Docker: Arquitetura otimizada para rodar em servidores isolados utilizando drivers NVIDIA CUDA.
+- Deteccao multi-rosto em tempo real.
+- Bounding boxes coloridas por face detectada.
+- Analise independente por rosto.
+- Uso de InsightFace com ONNXRuntime GPU.
+- Execucao em container Docker com suporte a NVIDIA CUDA/cuDNN.
 
-## Tecnologias e Infraestrutura Utilizadas
+## Tecnologias
 
-- Back-end / Engine de IA: Python 3.10, FastAPI, Uvicorn, OpenCV e PyTorch.
-- Modelos de Visão Computacional: InsightFace (Engine Neural profunda para análise facial 3D).
-- Infraestrutura e Deploy: Docker Desktop (WSL2) utilizando a imagem oficial de runtime da NVIDIA Corporation.
-- Hardware de Validação Host: Laptop com GPU Dedicada NVIDIA GeForce RTX 3050 Ti (4GB VRAM).
+- Python 3.10
+- FastAPI e Uvicorn
+- OpenCV
+- InsightFace
+- ONNXRuntime GPU
+- Docker Desktop com WSL2
+- NVIDIA CUDA 11.8 + cuDNN 8
 
-## Estrutura do Projeto
+## Estrutura
 
+```text
 liveness-stream/
-├── app.py              # Backend FastAPI com lógica de IA e Interface Web (HTML5/JS)
-├── dockerfile          # Configuração do ambiente isolado Ubuntu com suporte a CUDA 11.8
-└── requirements.txt    # Dependências estruturais do ecossistema Python
+|-- app.py            # API FastAPI, inferencia e interface web
+|-- dockerfile        # Imagem Docker com CUDA/cuDNN
+|-- requirements.txt  # Dependencias Python
+`-- readme.md         # Documentacao do projeto
+```
 
-## Pre-requisitos no Sistema Hospedeiro (Host)
+## Pre-requisitos
 
-1. Docker Desktop instalado com suporte a instâncias WSL2 ativado.
-2. NVIDIA Drivers atualizados no seu Windows.
-3. NVIDIA Container Toolkit instalado e configurado (o ecossistema do WSL2 geralmente mapeia os drivers automaticamente se o Docker Desktop estiver atualizado).
-4. Certificar-se de que o subsistema Linux está atualizado executando no PowerShell:
-   wsl --update
+1. Docker Desktop instalado e usando WSL2.
+2. Driver NVIDIA atualizado no Windows.
+3. Suporte a GPU habilitado no Docker.
+4. WSL atualizado:
 
-## Como Compilar e Executar o Projeto
+```powershell
+wsl --update
+```
 
-Siga os passos abaixo utilizando o terminal PowerShell do Windows dentro do diretório do projeto:
+5. Validar se a GPU aparece no host:
 
-1. Limpar Resíduos e Portas Presas
-Caso algum container antigo ou processo fantasma esteja utilizando a porta do servidor, execute o comando de limpeza:
-docker stop $(docker ps -q) 2>$null
+```powershell
+nvidia-smi
+```
 
-2. Construir a Imagem Docker
-Compile a imagem isolada do container com todas as dependências de Deep Learning:
+## Como Subir o Container
+
+Execute os comandos abaixo no PowerShell dentro da pasta do projeto:
+
+```powershell
+docker stop ia-liveness-api-gpu
 docker build -t ia-liveness-api .
+docker run -d --rm --gpus device=0 -p 8080:8000 --name ia-liveness-api-gpu ia-liveness-api
+```
 
-3. Iniciar o Container acoplado à GPU NVIDIA (RTX 3050 Ti)
-Execute o container mapeando a porta interna 8000 para a porta local 8080 do seu Windows, instruindo o ecossistema a carregar as dependências de aceleração gráfica direto no índice padrão da sua GPU dedicada (device=0):
-docker run --rm -p 8080:8000 --gpus device=0 ia-liveness-api
+Depois acesse:
 
-Nota: Na primeira execução, a inteligência neural do InsightFace fará o download automatizado dos pesos oficiais do modelo buffalo_l para dentro da imagem. O servidor estará pronto assim que exibir a mensagem: [*] Modelo Multi-Face Neural carregado com sucesso!.
-
-4. Acessar a Aplicação
-Abra o seu navegador de preferência (Google Chrome, Microsoft Edge, etc.) e acesse o endereço local:
+```text
 http://localhost:8080
+```
 
-Conceda permissão de acesso à webcam quando solicitado pelo navegador e inicie os testes práticos de validação biométrica.
+Se o container ainda nao existir, o primeiro comando pode retornar erro dizendo que
+nao encontrou `ia-liveness-api-gpu`. Nesse caso, continue com o `docker build` e o
+`docker run`.
 
-## Logica de Tomada de Decisao do Algoritmo
+## Verificar Uso da GPU
 
-1. Validação Volumétrica (Z-Axis Variance): Rostos humanos reais possuem curvas acentuadas tridimensionais (a ponta do nariz fica muito mais próxima da lente da câmera do que as orelhas). Fotos e telas planas possuem vetor de variação geométrica tendendo a zero. O modelo calcula essa discrepância nos tensores gráficos.
-2. Filtro Cromático Dinâmico (Saturate HSV Noise): Telas de smartphones ou monitores emitem luz própria polarizada, gerando micro-padrões de ruído (Moiré) e picos artificiais de saturação cromática na pele. O script analisa o recorte local da face para identificar anomalias térmicas e de iluminação reflexiva.
+Confira se o container esta rodando:
+
+```powershell
+docker ps
+```
+
+Confira se o processo Python aparece na RTX:
+
+```powershell
+docker exec ia-liveness-api-gpu nvidia-smi
+```
+
+Confira os logs da aplicacao:
+
+```powershell
+docker logs --tail 80 ia-liveness-api-gpu
+```
+
+Os logs devem mostrar algo parecido com:
+
+```text
+ONNXRuntime providers disponiveis: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'AzureExecutionProvider', 'CPUExecutionProvider']
+Applied providers: ['CUDAExecutionProvider', 'CPUExecutionProvider']
+```
+
+Se aparecer apenas `CPUExecutionProvider`, a inferencia nao esta usando a GPU.
+
+## Observacoes Sobre GPU
+
+O modelo de face roda via InsightFace + ONNXRuntime. Por isso, quem precisa mostrar
+`CUDAExecutionProvider` e o ONNXRuntime, nao o PyTorch.
+
+A CPU ainda pode ficar em uso alto porque algumas etapas continuam no processador:
+
+- captura/envio dos frames pelo navegador;
+- decodificacao e codificacao JPEG;
+- partes do OpenCV;
+- FastAPI/Uvicorn;
+- trafego HTTP frequente para `/predict`.
+
+Isso e normal. A validacao correta e ver `CUDAExecutionProvider` nos logs e o
+processo Python consumindo memoria da GPU no `nvidia-smi`.
+
+## Logica de Decisao
+
+1. Variacao de profundidade no eixo Z: usa landmarks 3D para comparar diferencas de
+   profundidade entre regioes da face.
+2. Analise cromatica HSV: calcula saturacao media no recorte do rosto para ajudar a
+   identificar reflexos e artefatos de tela.
 
 ## Autor
 
-Desenvolvido e mantido por:
-Leandro Nazareth
+Desenvolvido e mantido por Leandro Nazareth.
 
 LinkedIn: https://www.linkedin.com/in/leandrosnazareth/
