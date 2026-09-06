@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+opencv-python-headless
+numpy<2
+python-multipart
+insightface
+onnxruntime-gpu==1.16.3
