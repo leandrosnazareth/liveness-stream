@@ -104,7 +104,7 @@ async def index():
             body { font-family: Arial, sans-serif; text-align: center; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
             #container { display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
             video, canvas { display: none; }
-            #output-img { border: 4px solid #444; border-radius: 8px; width: 640px; height: 480px; transform: scaleX(-1); background: #000; }
+            #output-img { border: 4px solid #444; border-radius: 8px; width: 640px; height: 480px; background: #000; }
             #contador { margin-top: 15px; font-size: 22px; color: #aaa; font-weight: bold; }
         </style>
     </head>
