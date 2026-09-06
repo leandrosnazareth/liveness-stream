@@ -8,6 +8,16 @@ from insightface.app import FaceAnalysis
 
 app = FastAPI()
 
+
+def limitar(valor, minimo=0.0, maximo=1.0):
+    return max(minimo, min(maximo, valor))
+
+
+def calcular_liveness_score(variacao_profundidade, media_saturacao):
+    score_profundidade = limitar((variacao_profundidade - 8.0) / 14.0)
+    score_saturacao = limitar((190.0 - media_saturacao) / 80.0)
+    return limitar((score_profundidade * 0.65) + (score_saturacao * 0.35))
+
 ort_providers = ort.get_available_providers()
 print(f"[*] ONNXRuntime providers disponiveis: {ort_providers}")
 
@@ -40,7 +50,9 @@ async def predict(file: UploadFile = File(...)):
         # Detecta múltiplos rostos simultaneamente na cena
         faces = app_face.get(frame)
 
-        for face in faces:
+        faces_resultado = []
+
+        for indice, face in enumerate(faces, start=1):
             # Extrai os cantos da caixa delimitadora do rosto atual
             box = face.bbox.astype(int)
             x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
@@ -65,19 +77,41 @@ async def predict(file: UploadFile = File(...)):
                 media_saturacao = np.mean(s)
 
             # --- Regra de Decisão do Liveness (Nomenclatura 100% Limpa) ---
-            if variacao_profundidade < 14.5 or media_saturacao > 165.0:
+            real_score = calcular_liveness_score(variacao_profundidade, media_saturacao)
+            spoof_score = 1.0 - real_score
+
+            if real_score >= 0.70:
+                label = "REAL"
+                confianca = real_score
+                cor_borda = (0, 255, 0)  # Verde em BGR
+            elif real_score <= 0.45:
                 label = "SPOOF / FOTO"
+                confianca = spoof_score
                 cor_borda = (0, 0, 255)  # Vermelho em BGR
             else:
-                label = "REAL"
-                cor_borda = (0, 255, 0)  # Verde em BGR
+                label = "INCERTO"
+                confianca = max(real_score, spoof_score)
+                cor_borda = (0, 255, 255)  # Amarelo em BGR
+
+            texto_label = f"{label} {confianca * 100:.0f}%"
+            faces_resultado.append({
+                "id": indice,
+                "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "label": label,
+                "confianca": round(float(confianca), 3),
+                "real_score": round(float(real_score), 3),
+                "spoof_score": round(float(spoof_score), 3),
+            })
 
             # Desenha o retângulo ao redor do rosto identificado
             cv2.rectangle(frame, (x1, y1), (x2, y2), cor_borda, 3)
             
             # Adiciona o fundo e o texto da etiqueta acima da cabeça
-            cv2.rectangle(frame, (x1, y1 - 30), (x1 + 160, y1), cor_borda, -1)
-            cv2.putText(frame, label, (x1 + 5, y1 - 8), 
+            texto_tamanho, _ = cv2.getTextSize(texto_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            largura_label = texto_tamanho[0] + 14
+            topo_label = max(0, y1 - 32)
+            cv2.rectangle(frame, (x1, topo_label), (x1 + largura_label, y1), cor_borda, -1)
+            cv2.putText(frame, texto_label, (x1 + 7, max(22, y1 - 9)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
         # Transforma o frame processado com os desenhos de volta para codificação Web
@@ -87,6 +121,7 @@ async def predict(file: UploadFile = File(...)):
         return {
             "status": "sucesso",
             "quantidade_rostos": len(faces),
+            "faces": faces_resultado,
             "imagem_processada": f"data:image/jpeg;base64,{frame_base64}"
         }
         
