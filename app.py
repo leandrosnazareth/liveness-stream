@@ -23,6 +23,7 @@ def calcular_liveness_score(variacao_profundidade, media_saturacao):
 
 ort_providers = ort.get_available_providers()
 print(f"[*] ONNXRuntime providers disponiveis: {ort_providers}")
+model_loaded = False
 
 try:
     if "CUDAExecutionProvider" not in ort_providers:
@@ -34,12 +35,25 @@ try:
     )
     app_face.prepare(ctx_id=0, det_size=(640, 640))
     provider_ativo = "CUDA"
+    model_loaded = True
     print("[*] Modelo Multi-Face Neural carregado com sucesso!")
 except Exception as e:
     print(f"[-] Erro ao carregar na GPU, usando modo de compatibilidade: {e}")
     app_face = FaceAnalysis(allowed_modules=["detection", "landmark_3d_68"])
     app_face.prepare(ctx_id=-1, det_size=(640, 640))
     provider_ativo = "CPU"
+    model_loaded = True
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok" if model_loaded else "erro",
+        "onnx_providers": ort_providers,
+        "gpu_enabled": provider_ativo == "CUDA",
+        "provider_ativo": provider_ativo,
+        "model_loaded": model_loaded,
+    }
 
 
 @app.post("/predict")
