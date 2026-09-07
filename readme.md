@@ -8,6 +8,8 @@ O sistema detecta multiplos rostos no frame e classifica cada um como `REAL` ou
 modelo anti-spoofing, profundidade, textura, cor, movimento e historico temporal
 da face.
 
+![Preview da aplicacao de liveness](assets/liveness-preview.png)
+
 ## Stack
 
 - Python 3.10
