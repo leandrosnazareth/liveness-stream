@@ -14,6 +14,9 @@ com InsightFace e classifica cada rosto com uma decisao principal binaria de PAD
 - Analise temporal por face para reduzir oscilacoes entre frames.
 - Fusao de evidencias de profundidade, textura, cor, movimento e sinais de ataque.
 - Modelo dedicado MiniFASNet V2 ONNX para anti-spoofing visual.
+- Ensemble de crops do modelo PAD em diferentes escalas.
+- Desafio ativo simples para coletar evidencias de piscada e movimento.
+- Log CSV de calibracao com scores por face.
 - Scores separados para deteccao facial e anti-spoofing.
 - Uso de InsightFace com ONNXRuntime GPU.
 - Execucao em container Docker com suporte a NVIDIA CUDA/cuDNN.
@@ -137,6 +140,8 @@ A classificacao final combina:
 - suporte plano ao redor da face, como folha, cartaz ou impressao;
 - sinais provaveis de tela ou monitor;
 - movimento temporal, incluindo deslocamento, escala, profundidade e olhos;
+- paralaxe 3D temporal;
+- resposta ao desafio ativo;
 - estabilidade dos ultimos frames da mesma face.
 
 Para retornar `REAL`, o sistema exige evidencias suficientes de profundidade,
@@ -165,6 +170,8 @@ Cada face pode retornar campos como:
     "textura_natural": 0.24,
     "cor_natural": 0.42,
     "movimento_natural": 0.05,
+    "paralaxe_3d": 0.04,
+    "desafio_ativo_score": 0.12,
     "anti_spoofing": 0.12,
     "foto_score": 0.91,
     "tela_score": 0.22,
@@ -173,7 +180,13 @@ Cada face pode retornar campos como:
     "pad_model_print": 0.89,
     "pad_model_replay": 0.03,
     "pad_model_attack": 0.92
-  }
+  },
+  "desafio_ativo": {
+    "codigo": "PISQUE",
+    "texto": "Pisque",
+    "segundos_restantes": 7
+  },
+  "desafio_ok": false
 }
 ```
 
@@ -189,12 +202,16 @@ docker run -d --rm --gpus device=0 -p 8080:8000 `
   -e TEMPORAL_STABILITY_DELTA=0.18 `
   -e PAD_REAL_THRESHOLD=0.78 `
   -e PAD_SPOOF_THRESHOLD=0.42 `
-  -e PAD_MIN_MOTION_SCORE=0.25 `
+  -e PAD_MIN_MOTION_SCORE=0.18 `
   -e PAD_STRONG_ATTACK_SCORE=0.62 `
   -e PAD_FLAT_SUPPORT_SCORE=0.48 `
+  -e PAD_MIN_REAL_FACE_SCALE=0.23 `
+  -e PAD_LARGE_REAL_FACE_SCALE=0.30 `
+  -e PAD_MODEL_CROP_SCALES=2.0,2.7,3.4 `
   -e PAD_MODEL_REAL_THRESHOLD=0.72 `
   -e PAD_MODEL_ATTACK_THRESHOLD=0.55 `
-  -e PAD_LARGE_REAL_FACE_SCALE=0.30 `
+  -e CALIBRATION_LOG_ENABLED=true `
+  -e ACTIVE_CHALLENGE_ENABLED=true `
   ia-liveness-api
 ```
 
@@ -225,6 +242,41 @@ tres probabilidades:
 Quando o modelo esta carregado, a classificacao `REAL` tambem exige
 `pad_model_live >= PAD_MODEL_REAL_THRESHOLD` e
 `pad_model_attack < PAD_MODEL_ATTACK_THRESHOLD`.
+
+Por padrao, o mesmo modelo e executado com crops em multiplas escalas
+(`PAD_MODEL_CROP_SCALES=2.0,2.7,3.4`) e a media das probabilidades e usada na
+decisao. Tambem e possivel informar varios modelos separados por virgula em
+`PAD_MODEL_PATHS`.
+
+## Calibracao
+
+A cada face processada, a aplicacao grava um CSV com as evidencias usadas na
+decisao:
+
+```text
+/app/logs/liveness_calibration.csv
+```
+
+Para consultar as ultimas linhas pela API:
+
+```text
+GET /calibration?limit=20
+```
+
+Esse log ajuda a calibrar os limiares comparando exemplos reais, fotos impressas,
+telas e replays.
+
+## Desafio Ativo
+
+Quando `ACTIVE_CHALLENGE_ENABLED=true`, a API alterna pequenos desafios, como:
+
+- piscar;
+- virar a cabeca;
+- aproximar o rosto.
+
+O desafio atual aparece no painel e tambem e retornado no JSON em
+`desafio_ativo`. O resultado por face aparece em `desafio_ok` e no score
+`desafio_ativo_score`.
 
 ## Autor
 

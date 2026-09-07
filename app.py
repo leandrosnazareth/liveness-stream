@@ -1,9 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import HTMLResponse
 import base64
+import csv
 import os
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -28,9 +30,35 @@ PAD_FLAT_SUPPORT_SCORE = float(os.getenv("PAD_FLAT_SUPPORT_SCORE", "0.48"))
 PAD_MIN_REAL_FACE_SCALE = float(os.getenv("PAD_MIN_REAL_FACE_SCALE", "0.23"))
 PAD_LARGE_REAL_FACE_SCALE = float(os.getenv("PAD_LARGE_REAL_FACE_SCALE", "0.30"))
 PAD_MODEL_PATH = os.getenv("PAD_MODEL_PATH", "/app/models/minifasnet_v2.onnx")
+PAD_MODEL_PATHS = [
+    caminho.strip()
+    for caminho in os.getenv("PAD_MODEL_PATHS", PAD_MODEL_PATH).split(",")
+    if caminho.strip()
+]
 PAD_MODEL_ENABLED = os.getenv("PAD_MODEL_ENABLED", "true").lower() == "true"
 PAD_MODEL_REAL_THRESHOLD = float(os.getenv("PAD_MODEL_REAL_THRESHOLD", "0.72"))
 PAD_MODEL_ATTACK_THRESHOLD = float(os.getenv("PAD_MODEL_ATTACK_THRESHOLD", "0.55"))
+PAD_MODEL_CROP_SCALES = [
+    float(valor.strip())
+    for valor in os.getenv("PAD_MODEL_CROP_SCALES", "2.0,2.7,3.4").split(",")
+    if valor.strip()
+]
+CALIBRATION_LOG_ENABLED = os.getenv("CALIBRATION_LOG_ENABLED", "true").lower() == "true"
+CALIBRATION_LOG_PATH = os.getenv(
+    "CALIBRATION_LOG_PATH", "/app/logs/liveness_calibration.csv"
+)
+ACTIVE_CHALLENGE_ENABLED = (
+    os.getenv("ACTIVE_CHALLENGE_ENABLED", "true").lower() == "true"
+)
+ACTIVE_CHALLENGE_SECONDS = int(os.getenv("ACTIVE_CHALLENGE_SECONDS", "12"))
+ACTIVE_CHALLENGE_MIN_SCORE = float(os.getenv("ACTIVE_CHALLENGE_MIN_SCORE", "0.55"))
+
+CHALLENGES = [
+    ("PISQUE", "Pisque"),
+    ("VIRE_ESQUERDA", "Vire a cabeca para a esquerda"),
+    ("VIRE_DIREITA", "Vire a cabeca para a direita"),
+    ("APROXIME", "Aproxime o rosto"),
+]
 
 face_tracks = {}
 next_track_id = 1
@@ -206,44 +234,60 @@ def recortar_face_expandida(frame, bbox, escala=2.7):
     return crop if crop.size else None
 
 
-def inferir_modelo_pad(frame, bbox):
-    if not pad_model_loaded or pad_session is None:
-        return {
-            "pad_model_live": 0.0,
-            "pad_model_print": 0.0,
-            "pad_model_replay": 0.0,
-            "pad_model_attack": 0.0,
-            "pad_model_usado": False,
-        }
-
-    crop = recortar_face_expandida(frame, bbox)
-    if crop is None:
-        return {
-            "pad_model_live": 0.0,
-            "pad_model_print": 0.0,
-            "pad_model_replay": 0.0,
-            "pad_model_attack": 0.0,
-            "pad_model_usado": False,
-        }
-
+def preparar_entrada_pad(crop):
     entrada = cv2.resize(crop, (80, 80)).astype(np.float32) / 255.0
     entrada = np.transpose(entrada, (2, 0, 1))[None, :, :, :]
-    saida = pad_session.run(None, {pad_input_name: entrada})[0]
+    return entrada
+
+
+def inferir_sessao_pad(sessao, nome_entrada, entrada):
+    saida = sessao.run(None, {nome_entrada: entrada})[0]
     probabilidades = np.asarray(saida).reshape(-1)
     if probabilidades.size < 3:
-        return {
-            "pad_model_live": 0.0,
-            "pad_model_print": 0.0,
-            "pad_model_replay": 0.0,
-            "pad_model_attack": 0.0,
-            "pad_model_usado": False,
-        }
+        return None
 
     if not np.isclose(float(np.sum(probabilidades[:3])), 1.0, atol=0.08):
         probabilidades = softmax(probabilidades[:3])
     else:
         probabilidades = probabilidades[:3]
+    return probabilidades
 
+
+def inferir_modelo_pad(frame, bbox):
+    if not pad_model_loaded or not pad_sessions:
+        return {
+            "pad_model_live": 0.0,
+            "pad_model_print": 0.0,
+            "pad_model_replay": 0.0,
+            "pad_model_attack": 0.0,
+            "pad_model_ensemble": 0,
+            "pad_model_usado": False,
+        }
+
+    resultados = []
+    for escala in PAD_MODEL_CROP_SCALES:
+        crop = recortar_face_expandida(frame, bbox, escala=escala)
+        if crop is None:
+            continue
+        entrada = preparar_entrada_pad(crop)
+        for modelo in pad_sessions:
+            probabilidades = inferir_sessao_pad(
+                modelo["session"], modelo["input_name"], entrada
+            )
+            if probabilidades is not None:
+                resultados.append(probabilidades)
+
+    if not resultados:
+        return {
+            "pad_model_live": 0.0,
+            "pad_model_print": 0.0,
+            "pad_model_replay": 0.0,
+            "pad_model_attack": 0.0,
+            "pad_model_ensemble": 0,
+            "pad_model_usado": False,
+        }
+
+    probabilidades = np.mean(np.stack(resultados), axis=0)
     live = float(probabilidades[0])
     print_attack = float(probabilidades[1])
     replay_attack = float(probabilidades[2])
@@ -252,6 +296,7 @@ def inferir_modelo_pad(frame, bbox):
         "pad_model_print": limitar(print_attack),
         "pad_model_replay": limitar(replay_attack),
         "pad_model_attack": limitar(print_attack + replay_attack),
+        "pad_model_ensemble": len(resultados),
         "pad_model_usado": True,
     }
 
@@ -266,6 +311,10 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
     escala_face = (
         (largura_face * altura_face) / max(1, frame.shape[0] * frame.shape[1])
     ) ** 0.5
+    nariz_x = float((landmarks[30][0] - x1) / largura_face)
+    boca_abertura = float(
+        np.linalg.norm(landmarks[62][:2] - landmarks[66][:2]) / altura_face
+    )
 
     face_score = float(getattr(face, "det_score", 0.0) or 0.0)
     qualidade_face = limitar((face_score - 0.55) / 0.40)
@@ -346,6 +395,8 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
         "desvio_cor": desvio_cor,
         "nitidez": nitidez,
         "eye_aspect_ratio": calcular_eye_aspect_ratio(landmarks),
+        "nose_x_ratio": nariz_x,
+        "mouth_open_ratio": boca_abertura,
     }
 
 
@@ -398,6 +449,10 @@ def obter_track_id(bbox, frame_atual, tracks_usados):
             "areas": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "depth_values": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "eye_aspects": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "nose_x_ratios": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "mouth_open_ratios": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "parallax_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "challenge_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "last_seen": frame_atual,
         }
 
@@ -408,15 +463,155 @@ def obter_track_id(bbox, frame_atual, tracks_usados):
 def calcular_movimento_temporal(track):
     depths = list(track["depth_values"])
     eyes = list(track["eye_aspects"])
+    noses = list(track.get("nose_x_ratios", []))
+    mouths = list(track.get("mouth_open_ratios", []))
     if len(depths) < TEMPORAL_MIN_FRAMES:
         return 0.0
 
     movimento_profundidade = limitar((max(depths) - min(depths)) / 10.0) if depths else 0.0
     movimento_olhos = limitar((max(eyes) - min(eyes)) / 0.08) if eyes else 0.0
+    movimento_nariz = limitar((max(noses) - min(noses)) / 0.10) if noses else 0.0
+    movimento_boca = limitar((max(mouths) - min(mouths)) / 0.05) if mouths else 0.0
     return limitar(
-        (movimento_profundidade * 0.55)
-        + (movimento_olhos * 0.45)
+        (movimento_profundidade * 0.35)
+        + (movimento_olhos * 0.30)
+        + (movimento_nariz * 0.25)
+        + (movimento_boca * 0.10)
     )
+
+
+def calcular_paralaxe_temporal(track):
+    depths = list(track["depth_values"])
+    noses = list(track.get("nose_x_ratios", []))
+    areas = list(track.get("areas", []))
+    if len(depths) < TEMPORAL_MIN_FRAMES or len(noses) < TEMPORAL_MIN_FRAMES:
+        return 0.0
+
+    variacao_profundidade = limitar((max(depths) - min(depths)) / 9.0)
+    variacao_nariz = limitar((max(noses) - min(noses)) / 0.10)
+    area_media = max(sum(areas) / len(areas), 1.0)
+    variacao_area = limitar((max(areas) - min(areas)) / (area_media * 0.16)) if areas else 0.0
+    coerencia_3d = 1.0 - min(
+        abs(variacao_area - variacao_profundidade),
+        abs(variacao_area - variacao_nariz),
+    )
+    return limitar(
+        (variacao_profundidade * 0.40)
+        + (variacao_nariz * 0.35)
+        + (coerencia_3d * 0.25)
+    )
+
+
+def obter_desafio_atual():
+    if not ACTIVE_CHALLENGE_ENABLED:
+        return {"codigo": "LIVRE", "texto": "Modo livre", "segundos_restantes": 0}
+
+    periodo = max(ACTIVE_CHALLENGE_SECONDS, 1)
+    indice = int(time.time() // periodo) % len(CHALLENGES)
+    codigo, texto = CHALLENGES[indice]
+    segundos_restantes = periodo - int(time.time() % periodo)
+    return {
+        "codigo": codigo,
+        "texto": texto,
+        "segundos_restantes": segundos_restantes,
+    }
+
+
+def avaliar_desafio(track, desafio):
+    codigo = desafio["codigo"]
+    eyes = list(track.get("eye_aspects", []))
+    noses = list(track.get("nose_x_ratios", []))
+    areas = list(track.get("areas", []))
+
+    if codigo == "PISQUE" and len(eyes) >= TEMPORAL_MIN_FRAMES:
+        score = limitar((max(eyes) - min(eyes)) / 0.09)
+    elif codigo == "VIRE_ESQUERDA" and len(noses) >= TEMPORAL_MIN_FRAMES:
+        score = limitar((max(noses) - min(noses)) / 0.11)
+    elif codigo == "VIRE_DIREITA" and len(noses) >= TEMPORAL_MIN_FRAMES:
+        score = limitar((max(noses) - min(noses)) / 0.11)
+    elif codigo == "APROXIME" and len(areas) >= TEMPORAL_MIN_FRAMES:
+        area_media = max(sum(areas) / len(areas), 1.0)
+        score = limitar((max(areas) - min(areas)) / (area_media * 0.22))
+    else:
+        score = 0.0
+
+    return {
+        "codigo": codigo,
+        "texto": desafio["texto"],
+        "score": score,
+        "ok": score >= ACTIVE_CHALLENGE_MIN_SCORE,
+    }
+
+
+def registrar_calibracao(frame_atual, faces_resultado, metricas, desafio):
+    if not CALIBRATION_LOG_ENABLED or not faces_resultado:
+        return
+
+    campos = [
+        "timestamp",
+        "frame",
+        "track_id",
+        "label",
+        "tipo_apresentacao",
+        "confianca",
+        "frames_analisados",
+        "estavel",
+        "desafio_codigo",
+        "desafio_ok",
+        "face_detectada",
+        "profundidade",
+        "textura_natural",
+        "cor_natural",
+        "movimento_natural",
+        "paralaxe_3d",
+        "desafio_ativo_score",
+        "anti_spoofing",
+        "foto_score",
+        "tela_score",
+        "suporte_plano",
+        "escala_face",
+        "pad_model_live",
+        "pad_model_print",
+        "pad_model_replay",
+        "pad_model_attack",
+        "decode_ms",
+        "deteccao_ms",
+        "liveness_ms",
+        "encode_ms",
+        "total_ms",
+    ]
+
+    os.makedirs(os.path.dirname(CALIBRATION_LOG_PATH), exist_ok=True)
+    arquivo_existe = os.path.exists(CALIBRATION_LOG_PATH)
+    with open(CALIBRATION_LOG_PATH, "a", newline="", encoding="utf-8") as arquivo:
+        writer = csv.DictWriter(arquivo, fieldnames=campos)
+        if not arquivo_existe:
+            writer.writeheader()
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for face in faces_resultado:
+            evidencias = face.get("evidencias", {})
+            linha = {
+                "timestamp": timestamp,
+                "frame": frame_atual,
+                "track_id": face.get("id"),
+                "label": face.get("label"),
+                "tipo_apresentacao": face.get("tipo_apresentacao"),
+                "confianca": face.get("confianca"),
+                "frames_analisados": face.get("frames_analisados"),
+                "estavel": face.get("estavel"),
+                "desafio_codigo": desafio.get("codigo"),
+                "desafio_ok": face.get("desafio_ok"),
+                "decode_ms": metricas.get("decode_ms"),
+                "deteccao_ms": metricas.get("deteccao_ms"),
+                "liveness_ms": metricas.get("liveness_ms"),
+                "encode_ms": metricas.get("encode_ms"),
+                "total_ms": metricas.get("total_ms"),
+            }
+            for chave in campos:
+                if chave in evidencias:
+                    linha[chave] = evidencias[chave]
+            writer.writerow(linha)
 
 
 def media_deque(valores):
@@ -464,8 +659,18 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     track["areas"].append(float(area))
     track["depth_values"].append(float(evidencias["variacao_profundidade"]))
     track["eye_aspects"].append(float(evidencias["eye_aspect_ratio"]))
+    track.setdefault("nose_x_ratios", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("mouth_open_ratios", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("parallax_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("challenge_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track["nose_x_ratios"].append(float(evidencias["nose_x_ratio"]))
+    track["mouth_open_ratios"].append(float(evidencias["mouth_open_ratio"]))
 
     movimento_natural = calcular_movimento_temporal(track)
+    paralaxe_3d = calcular_paralaxe_temporal(track)
+    desafio = avaliar_desafio(track, obter_desafio_atual())
+    track["parallax_scores"].append(float(paralaxe_3d))
+    track["challenge_scores"].append(float(desafio["score"]))
     contexto_apresentacao = (
         evidencias["suporte_plano"] >= 0.25
         or evidencias["foto_score"] >= 0.45
@@ -487,7 +692,8 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
             + (evidencias["profundidade"] * 0.22)
             + (evidencias["textura_natural"] * 0.18)
             + (evidencias["cor_natural"] * 0.12)
-            + (movimento_natural * 0.20)
+            + (movimento_natural * 0.12)
+            + (paralaxe_3d * 0.08)
             + ((1.0 - ataque_visual) * 0.08)
         )
     else:
@@ -495,7 +701,8 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
             (evidencias["profundidade"] * 0.25)
             + (evidencias["textura_natural"] * 0.20)
             + (evidencias["cor_natural"] * 0.15)
-            + (movimento_natural * 0.25)
+            + (movimento_natural * 0.17)
+            + (paralaxe_3d * 0.08)
             + (evidencias["face_detectada"] * 0.05)
             + ((1.0 - ataque_visual) * 0.10)
         )
@@ -515,6 +722,8 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     pad_print_media = media_deque(track["pad_model_print_scores"])
     pad_replay_media = media_deque(track["pad_model_replay_scores"])
     pad_attack_media = media_deque(track["pad_model_attack_scores"])
+    paralaxe_media = media_deque(track["parallax_scores"])
+    desafio_media = media_deque(track["challenge_scores"])
     pad_model_usado = bool(evidencias["pad_model_usado"])
     contexto_apresentacao_media = (
         suporte_plano_media >= 0.25
@@ -533,6 +742,7 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
         and textura_media >= 0.42
         and cor_media >= 0.35
         and movimento_natural >= PAD_MIN_MOTION_SCORE
+        and paralaxe_media >= 0.18
         and max(foto_media, tela_media, suporte_plano_media) < PAD_FLAT_SUPPORT_SCORE
         and escala_face_media >= PAD_MIN_REAL_FACE_SCALE
         and (
@@ -552,6 +762,18 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
         and foto_media < 0.80
         and tela_media < 0.80
         and score_medio >= 0.35
+        and (paralaxe_media >= 0.12 or desafio_media >= ACTIVE_CHALLENGE_MIN_SCORE)
+    )
+    evidencia_temporal_forte_real = (
+        escala_face_media >= PAD_LARGE_REAL_FACE_SCALE
+        and profundidade_media >= 0.70
+        and cor_media >= 0.65
+        and movimento_natural >= 0.50
+        and paralaxe_media >= 0.55
+        and desafio_media >= ACTIVE_CHALLENGE_MIN_SCORE
+        and suporte_plano_media < 0.20
+        and foto_media < 0.35
+        and tela_media < 0.35
     )
 
     label = "SPOOF"
@@ -566,6 +788,20 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
         label = "REAL"
         tipo_apresentacao = "PRESENCA_FISICA"
         confianca = score_medio
+        cor_borda = (0, 255, 0)
+        cor_interface = "#22c55e"
+    elif evidencia_temporal_forte_real:
+        label = "REAL"
+        tipo_apresentacao = "PRESENCA_FISICA_CONFIRMADA"
+        confianca = limitar(
+            (
+                profundidade_media * 0.25
+                + cor_media * 0.15
+                + movimento_natural * 0.20
+                + paralaxe_media * 0.25
+                + desafio_media * 0.15
+            )
+        )
         cor_borda = (0, 255, 0)
         cor_interface = "#22c55e"
     elif face_real_grande_com_oclusao:
@@ -604,6 +840,9 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
             "textura_natural": textura_media,
             "cor_natural": cor_media,
             "movimento_natural": movimento_natural,
+            "paralaxe_3d": paralaxe_media,
+            "desafio_ativo_score": desafio_media,
+            "desafio_ativo_ok": 1.0 if desafio["ok"] else 0.0,
             "anti_spoofing": score_medio,
             "foto_score": foto_media,
             "tela_score": tela_media,
@@ -657,24 +896,44 @@ except Exception as e:
 
 pad_session = None
 pad_input_name = None
+pad_sessions = []
 pad_model_loaded = False
 pad_model_provider = None
 
 if PAD_MODEL_ENABLED:
     try:
-        if not os.path.exists(PAD_MODEL_PATH):
-            raise FileNotFoundError(f"Modelo PAD nao encontrado: {PAD_MODEL_PATH}")
-
         pad_providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
             if provider_ativo == "CUDA"
             else ["CPUExecutionProvider"]
         )
-        pad_session = ort.InferenceSession(PAD_MODEL_PATH, providers=pad_providers)
-        pad_input_name = pad_session.get_inputs()[0].name
-        pad_model_provider = pad_session.get_providers()[0]
+
+        for caminho_modelo in PAD_MODEL_PATHS:
+            if not os.path.exists(caminho_modelo):
+                print(f"[-] Modelo PAD nao encontrado: {caminho_modelo}")
+                continue
+
+            session = ort.InferenceSession(caminho_modelo, providers=pad_providers)
+            input_name = session.get_inputs()[0].name
+            pad_sessions.append(
+                {
+                    "path": caminho_modelo,
+                    "session": session,
+                    "input_name": input_name,
+                    "provider": session.get_providers()[0],
+                }
+            )
+
+        if not pad_sessions:
+            raise FileNotFoundError(
+                f"Nenhum modelo PAD carregado em: {', '.join(PAD_MODEL_PATHS)}"
+            )
+
+        pad_session = pad_sessions[0]["session"]
+        pad_input_name = pad_sessions[0]["input_name"]
+        pad_model_provider = pad_sessions[0]["provider"]
         pad_model_loaded = True
-        print(f"[*] Modelo PAD carregado: {PAD_MODEL_PATH}")
+        print(f"[*] Modelos PAD carregados: {[m['path'] for m in pad_sessions]}")
         print(f"[*] Provider PAD ativo: {pad_model_provider}")
     except Exception as e:
         print(f"[-] Modelo PAD indisponivel, usando heuristicas: {e}")
@@ -691,7 +950,33 @@ async def health():
         "pad_model_enabled": PAD_MODEL_ENABLED,
         "pad_model_loaded": pad_model_loaded,
         "pad_model_path": PAD_MODEL_PATH,
+        "pad_model_paths": PAD_MODEL_PATHS,
         "pad_model_provider": pad_model_provider,
+        "pad_model_count": len(pad_sessions),
+        "pad_model_crop_scales": PAD_MODEL_CROP_SCALES,
+        "calibration_log_enabled": CALIBRATION_LOG_ENABLED,
+        "calibration_log_path": CALIBRATION_LOG_PATH,
+        "active_challenge_enabled": ACTIVE_CHALLENGE_ENABLED,
+    }
+
+
+@app.get("/calibration")
+async def calibration(limit: int = Query(20, ge=1, le=200)):
+    if not os.path.exists(CALIBRATION_LOG_PATH):
+        return {
+            "status": "sem_logs",
+            "path": CALIBRATION_LOG_PATH,
+            "linhas": [],
+        }
+
+    with open(CALIBRATION_LOG_PATH, newline="", encoding="utf-8") as arquivo:
+        linhas = list(csv.DictReader(arquivo))
+
+    return {
+        "status": "ok",
+        "path": CALIBRATION_LOG_PATH,
+        "total": len(linhas),
+        "linhas": linhas[-limit:],
     }
 
 
@@ -707,6 +992,7 @@ async def predict(
         frame_atual = frame_sequence
         inicio_total = time.perf_counter()
         request_object_content = await file.read()
+        desafio_atual = obter_desafio_atual()
 
         inicio_decode = time.perf_counter()
         np_array = np.frombuffer(request_object_content, np.uint8)
@@ -752,6 +1038,10 @@ async def predict(
                     "bbox": bbox,
                     "label": label,
                     "tipo_apresentacao": decisao_temporal["tipo_apresentacao"],
+                    "desafio_ativo": desafio_atual,
+                    "desafio_ok": bool(
+                        decisao_temporal["evidencias"]["desafio_ativo_ok"]
+                    ),
                     "confianca": round(float(confianca), 3),
                     "score": round(float(confianca), 3),
                     "face_score": round(float(evidencias["face_detectada"]), 3),
@@ -759,6 +1049,7 @@ async def predict(
                         float(decisao_temporal["evidencias"]["anti_spoofing"]), 3
                     ),
                     "pad_model_usado": bool(evidencias["pad_model_usado"]),
+                    "pad_model_ensemble": int(evidencias["pad_model_ensemble"]),
                     "real_score_medio": round(
                         float(decisao_temporal["real_score_medio"]), 3
                     ),
@@ -806,6 +1097,15 @@ async def predict(
             tempo_encode_ms = (time.perf_counter() - inicio_encode) * 1000
         tempo_total_ms = (time.perf_counter() - inicio_total) * 1000
 
+        metricas = {
+            "decode_ms": round(tempo_decode_ms, 2),
+            "deteccao_ms": round(tempo_deteccao_ms, 2),
+            "liveness_ms": round(tempo_liveness_ms, 2),
+            "encode_ms": round(tempo_encode_ms, 2),
+            "total_ms": round(tempo_total_ms, 2),
+        }
+        registrar_calibracao(frame_atual, faces_resultado, metricas, desafio_atual)
+
         resposta = {
             "status": "sucesso",
             "modo": modo,
@@ -816,6 +1116,7 @@ async def predict(
                 "altura": int(frame.shape[0]),
             },
             "faces": faces_resultado,
+            "desafio_ativo": desafio_atual,
             "analise_temporal": {
                 "janela": TEMPORAL_WINDOW_SIZE,
                 "min_frames": TEMPORAL_MIN_FRAMES,
@@ -833,13 +1134,7 @@ async def predict(
                 "pad_model_attack_threshold": PAD_MODEL_ATTACK_THRESHOLD,
                 "tracks_ativos": len(face_tracks),
             },
-            "metricas": {
-                "decode_ms": round(tempo_decode_ms, 2),
-                "deteccao_ms": round(tempo_deteccao_ms, 2),
-                "liveness_ms": round(tempo_liveness_ms, 2),
-                "encode_ms": round(tempo_encode_ms, 2),
-                "total_ms": round(tempo_total_ms, 2),
-            },
+            "metricas": metricas,
         }
         if frame_base64 is not None:
             resposta["imagem_processada"] = f"data:image/jpeg;base64,{frame_base64}"
@@ -897,6 +1192,8 @@ async def index():
                 <div class="status-item"><span class="status-label">Latencia media</span><span class="status-value" id="latencia-media">0 ms</span></div>
                 <div class="status-item"><span class="status-label">Rostos</span><span class="status-value" id="status-rostos">0</span></div>
                 <div class="status-item"><span class="status-label">Tipo provavel</span><span class="status-value" id="tipo-apresentacao">--</span></div>
+                <div class="status-item"><span class="status-label">Desafio</span><span class="status-value" id="desafio-ativo">--</span></div>
+                <div class="status-item"><span class="status-label">Desafio status</span><span class="status-value" id="desafio-status">--</span></div>
                 <div class="status-item"><span class="status-label">Provider</span><span class="status-value" id="provider-ativo">--</span></div>
                 <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
                 <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
@@ -912,6 +1209,7 @@ async def index():
                 <div class="status-item"><span class="status-label">Profundidade</span><span class="status-value" id="score-profundidade">0%</span></div>
                 <div class="status-item"><span class="status-label">Textura natural</span><span class="status-value" id="score-textura">0%</span></div>
                 <div class="status-item"><span class="status-label">Movimento natural</span><span class="status-value" id="score-movimento">0%</span></div>
+                <div class="status-item"><span class="status-label">Paralaxe 3D</span><span class="status-value" id="score-paralaxe">0%</span></div>
                 <div class="status-item"><span class="status-label">Anti-spoofing</span><span class="status-value" id="score-antispoofing">0%</span></div>
                 <div class="status-item"><span class="status-label">Suporte plano</span><span class="status-value" id="score-suporte-plano">0%</span></div>
                 <div class="status-item"><span class="status-label">Escala da face</span><span class="status-value" id="score-escala-face">0%</span></div>
@@ -934,6 +1232,8 @@ async def index():
             const latenciaMediaEl = document.getElementById('latencia-media');
             const statusRostosEl = document.getElementById('status-rostos');
             const tipoApresentacaoEl = document.getElementById('tipo-apresentacao');
+            const desafioAtivoEl = document.getElementById('desafio-ativo');
+            const desafioStatusEl = document.getElementById('desafio-status');
             const providerAtivoEl = document.getElementById('provider-ativo');
             const resolucaoFrameEl = document.getElementById('resolucao-frame');
             const statusCameraEl = document.getElementById('status-camera');
@@ -949,6 +1249,7 @@ async def index():
             const scoreProfundidadeEl = document.getElementById('score-profundidade');
             const scoreTexturaEl = document.getElementById('score-textura');
             const scoreMovimentoEl = document.getElementById('score-movimento');
+            const scoreParalaxeEl = document.getElementById('score-paralaxe');
             const scoreAntispoofingEl = document.getElementById('score-antispoofing');
             const scoreSuportePlanoEl = document.getElementById('score-suporte-plano');
             const scoreEscalaFaceEl = document.getElementById('score-escala-face');
@@ -1064,6 +1365,9 @@ async def index():
                                     }
                                     contadorDiv.innerHTML = `Rostos na cena: ${data.quantidade_rostos}`;
                                     statusRostosEl.textContent = data.quantidade_rostos;
+                                    if (data.desafio_ativo) {
+                                        desafioAtivoEl.textContent = `${data.desafio_ativo.texto} (${data.desafio_ativo.segundos_restantes}s)`;
+                                    }
                                     providerAtivoEl.textContent = data.provider_ativo || "--";
                                     atualizarClasseStatus(providerAtivoEl, data.provider_ativo === "CUDA" ? "status-ok" : "status-warn");
 
@@ -1082,6 +1386,8 @@ async def index():
                                     const primeiraFace = (data.faces || [])[0];
                                     if (data.analise_temporal && primeiraFace) {
                                         tipoApresentacaoEl.textContent = primeiraFace.tipo_apresentacao || "--";
+                                        desafioStatusEl.textContent = primeiraFace.desafio_ok ? "ok" : "pendente";
+                                        atualizarClasseStatus(desafioStatusEl, primeiraFace.desafio_ok ? "status-ok" : "status-warn");
                                         framesTemporaisEl.textContent = `${primeiraFace.frames_analisados}/${data.analise_temporal.min_frames}`;
                                         estabilidadeTemporalEl.textContent = primeiraFace.estavel ? "estavel" : "analisando";
                                         atualizarClasseStatus(estabilidadeTemporalEl, primeiraFace.estavel ? "status-ok" : "status-warn");
@@ -1090,6 +1396,7 @@ async def index():
                                             scoreProfundidadeEl.textContent = `${(primeiraFace.evidencias.profundidade * 100).toFixed(0)}%`;
                                             scoreTexturaEl.textContent = `${(primeiraFace.evidencias.textura_natural * 100).toFixed(0)}%`;
                                             scoreMovimentoEl.textContent = `${(primeiraFace.evidencias.movimento_natural * 100).toFixed(0)}%`;
+                                            scoreParalaxeEl.textContent = `${(primeiraFace.evidencias.paralaxe_3d * 100).toFixed(0)}%`;
                                             scoreAntispoofingEl.textContent = `${(primeiraFace.evidencias.anti_spoofing * 100).toFixed(0)}%`;
                                             scoreSuportePlanoEl.textContent = `${(primeiraFace.evidencias.suporte_plano * 100).toFixed(0)}%`;
                                             scoreEscalaFaceEl.textContent = `${(primeiraFace.evidencias.escala_face * 100).toFixed(0)}%`;
@@ -1099,6 +1406,8 @@ async def index():
                                         }
                                     } else if (data.analise_temporal) {
                                         tipoApresentacaoEl.textContent = "--";
+                                        desafioStatusEl.textContent = "--";
+                                        atualizarClasseStatus(desafioStatusEl, "");
                                         framesTemporaisEl.textContent = `0/${data.analise_temporal.min_frames}`;
                                         estabilidadeTemporalEl.textContent = "--";
                                         atualizarClasseStatus(estabilidadeTemporalEl, "");
@@ -1106,6 +1415,7 @@ async def index():
                                         scoreProfundidadeEl.textContent = "0%";
                                         scoreTexturaEl.textContent = "0%";
                                         scoreMovimentoEl.textContent = "0%";
+                                        scoreParalaxeEl.textContent = "0%";
                                         scoreAntispoofingEl.textContent = "0%";
                                         scoreSuportePlanoEl.textContent = "0%";
                                         scoreEscalaFaceEl.textContent = "0%";
