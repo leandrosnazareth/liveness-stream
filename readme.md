@@ -3,13 +3,18 @@
 Este projeto e uma aplicacao de Inteligencia Artificial para deteccao de vivacidade
 (Liveness Detection / Anti-Spoofing) em tempo real. A aplicacao captura o feed da
 webcam pelo navegador, envia frames para uma API FastAPI, detecta multiplos rostos
-com InsightFace e classifica cada rosto como `REAL` ou `SPOOF / FOTO`.
+com InsightFace e classifica cada rosto com uma decisao de PAD
+(Presentation Attack Detection), como `REAL`, `FOTO`, `TELA`, `SPOOF` ou
+`INCERTO`.
 
 ## Funcionalidades
 
 - Deteccao multi-rosto em tempo real.
 - Bounding boxes coloridas por face detectada.
 - Analise independente por rosto.
+- Analise temporal por face para reduzir oscilacoes entre frames.
+- Fusao de evidencias de profundidade, textura, cor, movimento e sinais de ataque.
+- Scores separados para deteccao facial e anti-spoofing.
 - Uso de InsightFace com ONNXRuntime GPU.
 - Execucao em container Docker com suporte a NVIDIA CUDA/cuDNN.
 
@@ -117,10 +122,74 @@ processo Python consumindo memoria da GPU no `nvidia-smi`.
 
 ## Logica de Decisao
 
-1. Variacao de profundidade no eixo Z: usa landmarks 3D para comparar diferencas de
-   profundidade entre regioes da face.
-2. Analise cromatica HSV: calcula saturacao media no recorte do rosto para ajudar a
-   identificar reflexos e artefatos de tela.
+A deteccao facial e o liveness sao tratados como etapas diferentes. O score do
+detector de face indica apenas se existe um rosto na imagem; ele nao e usado como
+prova suficiente de pessoa real.
+
+A classificacao final combina:
+
+- qualidade da deteccao facial;
+- profundidade estimada por landmarks 3D;
+- textura e nitidez do recorte facial;
+- distribuicao de cor, saturacao e brilho;
+- sinais provaveis de foto impressa;
+- suporte plano ao redor da face, como folha, cartaz ou impressao;
+- sinais provaveis de tela ou monitor;
+- movimento temporal, incluindo deslocamento, escala, profundidade e olhos;
+- estabilidade dos ultimos frames da mesma face.
+
+Para retornar `REAL`, o sistema exige evidencias suficientes de profundidade,
+textura, cor e movimento natural ao longo de varios frames. Quando as evidencias
+sao fracas, conflitantes ou ainda insuficientes, o resultado preferencial e
+`INCERTO`, evitando falso `REAL 100%` apenas por haver um rosto detectado.
+
+## Scores Retornados
+
+Cada face pode retornar campos como:
+
+```json
+{
+  "label": "FOTO",
+  "confianca": 0.91,
+  "face_score": 0.99,
+  "anti_spoofing_score": 0.12,
+  "evidencias": {
+    "face_detectada": 0.99,
+    "profundidade": 0.18,
+    "textura_natural": 0.24,
+    "cor_natural": 0.42,
+    "movimento_natural": 0.05,
+    "anti_spoofing": 0.12,
+    "foto_score": 0.91,
+    "tela_score": 0.22,
+    "suporte_plano": 0.88
+  }
+}
+```
+
+## Ajustes de Liveness/PAD
+
+Os limiares podem ser ajustados por variaveis de ambiente no `docker run`:
+
+```powershell
+docker run -d --rm --gpus device=0 -p 8080:8000 `
+  --name ia-liveness-api-gpu `
+  -e TEMPORAL_WINDOW_SIZE=12 `
+  -e TEMPORAL_MIN_FRAMES=5 `
+  -e TEMPORAL_STABILITY_DELTA=0.18 `
+  -e PAD_REAL_THRESHOLD=0.78 `
+  -e PAD_SPOOF_THRESHOLD=0.42 `
+  -e PAD_MIN_MOTION_SCORE=0.25 `
+  -e PAD_STRONG_ATTACK_SCORE=0.62 `
+  -e PAD_FLAT_SUPPORT_SCORE=0.48 `
+  ia-liveness-api
+```
+
+Valores mais altos em `PAD_REAL_THRESHOLD` e `PAD_MIN_MOTION_SCORE` deixam a
+decisao `REAL` mais conservadora. Valores menores em `PAD_STRONG_ATTACK_SCORE`
+fazem o sistema marcar `FOTO` ou `TELA` com menos evidencia acumulada.
+Valores menores em `PAD_FLAT_SUPPORT_SCORE` deixam a deteccao de foto impressa
+em folha/cartaz mais sensivel.
 
 ## Autor
 
