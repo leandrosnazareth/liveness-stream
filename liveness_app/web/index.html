@@ -1,0 +1,357 @@
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>IA Multi-Liveness Real-Time</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #141414; color: #fff; margin: 0; padding: 18px; }
+            h1 { margin: 0 0 14px; text-align: center; font-size: 28px; line-height: 1.15; }
+            #container { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+            #workspace { display: grid; grid-template-columns: minmax(170px, 210px) minmax(420px, 640px) minmax(170px, 210px); gap: 14px; align-items: start; width: min(1120px, 100%); }
+            #video-stage { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+            video { display: none; }
+            canvas, #output-img { border: 3px solid #444; border-radius: 8px; width: 100%; max-width: 640px; aspect-ratio: 4 / 3; height: auto; background: #000; box-sizing: border-box; }
+            #output-img { display: none; }
+            #contador { margin-top: 10px; font-size: 20px; color: #b8b8b8; font-weight: bold; text-align: center; }
+            #modo-controle { display: flex; gap: 8px; margin: 0 0 12px; }
+            .modo-btn { border: 1px solid #3a3a3a; border-radius: 6px; background: #252525; color: #d4d4d4; cursor: pointer; font-weight: 700; padding: 9px 14px; }
+            .modo-btn.ativo { background: #0f766e; border-color: #14b8a6; color: #fff; }
+            .side-panel { display: flex; flex-direction: column; gap: 7px; padding-top: 46px; }
+            .panel-title { color: #d4d4d4; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 3px; }
+            .status-item { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 24px; border-bottom: 1px solid #2d2d2d; text-align: left; }
+            .status-label { color: #9ca3af; font-size: 12px; line-height: 1.2; }
+            .status-value { color: #f5f5f5; font-size: 15px; font-weight: 800; line-height: 1.2; text-align: right; overflow-wrap: anywhere; }
+            .status-ok { color: #22c55e; }
+            .status-warn { color: #facc15; }
+            .status-error { color: #ef4444; }
+            @media (max-width: 980px) {
+                #workspace { grid-template-columns: 1fr; width: min(680px, 100%); }
+                .side-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 14px; padding-top: 0; width: 100%; order: 2; }
+                #video-stage { order: 1; }
+                .panel-title { grid-column: 1 / -1; }
+                .status-item { min-height: 22px; }
+            }
+            @media (max-width: 560px) {
+                body { padding: 12px; }
+                h1 { font-size: 22px; }
+                .side-panel { grid-template-columns: 1fr; }
+                .status-value { font-size: 14px; }
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Deteccao de Vivacidade Multi-Rosto (GPU Ativa)</h1>
+        <div id="container">
+            <div id="workspace">
+                <aside class="side-panel" id="status-left">
+                    <div class="panel-title">Sistema</div>
+                    <div class="status-item"><span class="status-label">Provider</span><span class="status-value" id="provider-ativo">--</span></div>
+                    <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
+                    <div class="status-item"><span class="status-label">Fila</span><span class="status-value" id="status-fila">livre</span></div>
+                    <div class="status-item"><span class="status-label">FPS captura</span><span class="status-value" id="fps-captura">0</span></div>
+                    <div class="status-item"><span class="status-label">FPS inferencia</span><span class="status-value" id="fps-inferencia">0</span></div>
+                    <div class="status-item"><span class="status-label">Latencia</span><span class="status-value" id="latencia-media">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
+                    <div class="status-item"><span class="status-label">Rostos</span><span class="status-value" id="status-rostos">0</span></div>
+                    <div class="panel-title">Backend</div>
+                    <div class="status-item"><span class="status-label">Decode</span><span class="status-value" id="tempo-decode">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Deteccao</span><span class="status-value" id="tempo-deteccao">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Liveness</span><span class="status-value" id="tempo-liveness">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Encode</span><span class="status-value" id="tempo-encode">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Total</span><span class="status-value" id="tempo-total-backend">0 ms</span></div>
+                </aside>
+
+                <main id="video-stage">
+                    <div id="modo-controle">
+                        <button class="modo-btn ativo" id="modo-metadata" type="button">Metadados</button>
+                        <button class="modo-btn" id="modo-imagem" type="button">Imagem completa</button>
+                    </div>
+                    <video id="video" width="640" height="480" autoplay></video>
+                    <canvas id="canvas" width="640" height="480"></canvas>
+                    <img id="output-img" />
+                    <div id="contador">Detectando ambiente...</div>
+                </main>
+
+                <aside class="side-panel" id="status-right">
+                    <div class="panel-title">Liveness</div>
+                    <div class="status-item"><span class="status-label">Desafio</span><span class="status-value" id="desafio-ativo">--</span></div>
+                    <div class="status-item"><span class="status-label">Desafio status</span><span class="status-value" id="desafio-status">--</span></div>
+                    <div class="status-item"><span class="status-label">Frames</span><span class="status-value" id="frames-temporais">0/0</span></div>
+                    <div class="status-item"><span class="status-label">Estabilidade</span><span class="status-value" id="estabilidade-temporal">--</span></div>
+                    <div class="status-item"><span class="status-label">Face detectada</span><span class="status-value" id="score-face">0%</span></div>
+                    <div class="status-item"><span class="status-label">Profundidade</span><span class="status-value" id="score-profundidade">0%</span></div>
+                    <div class="status-item"><span class="status-label">Textura</span><span class="status-value" id="score-textura">0%</span></div>
+                    <div class="status-item"><span class="status-label">Movimento</span><span class="status-value" id="score-movimento">0%</span></div>
+                    <div class="status-item"><span class="status-label">Paralaxe 3D</span><span class="status-value" id="score-paralaxe">0%</span></div>
+                    <div class="status-item"><span class="status-label">Anti-spoofing</span><span class="status-value" id="score-antispoofing">0%</span></div>
+                    <div class="status-item"><span class="status-label">Suporte plano</span><span class="status-value" id="score-suporte-plano">0%</span></div>
+                    <div class="status-item"><span class="status-label">Escala face</span><span class="status-value" id="score-escala-face">0%</span></div>
+                    <div class="panel-title">Modelo PAD</div>
+                    <div class="status-item"><span class="status-label">Live</span><span class="status-value" id="score-modelo-live">0%</span></div>
+                    <div class="status-item"><span class="status-label">Print</span><span class="status-value" id="score-modelo-print">0%</span></div>
+                    <div class="status-item"><span class="status-label">Replay</span><span class="status-value" id="score-modelo-replay">0%</span></div>
+                </aside>
+            </div>
+        </div>
+
+        <script>
+            const video = document.getElementById('video');
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('2d');
+            const outputImg = document.getElementById('output-img');
+            const contadorDiv = document.getElementById('contador');
+            const modoMetadataBtn = document.getElementById('modo-metadata');
+            const modoImagemBtn = document.getElementById('modo-imagem');
+            const fpsCapturaEl = document.getElementById('fps-captura');
+            const fpsInferenciaEl = document.getElementById('fps-inferencia');
+            const latenciaMediaEl = document.getElementById('latencia-media');
+            const statusRostosEl = document.getElementById('status-rostos');
+            const desafioAtivoEl = document.getElementById('desafio-ativo');
+            const desafioStatusEl = document.getElementById('desafio-status');
+            const providerAtivoEl = document.getElementById('provider-ativo');
+            const resolucaoFrameEl = document.getElementById('resolucao-frame');
+            const statusCameraEl = document.getElementById('status-camera');
+            const statusFilaEl = document.getElementById('status-fila');
+            const tempoDecodeEl = document.getElementById('tempo-decode');
+            const tempoDeteccaoEl = document.getElementById('tempo-deteccao');
+            const tempoLivenessEl = document.getElementById('tempo-liveness');
+            const tempoEncodeEl = document.getElementById('tempo-encode');
+            const tempoTotalBackendEl = document.getElementById('tempo-total-backend');
+            const framesTemporaisEl = document.getElementById('frames-temporais');
+            const estabilidadeTemporalEl = document.getElementById('estabilidade-temporal');
+            const scoreFaceEl = document.getElementById('score-face');
+            const scoreProfundidadeEl = document.getElementById('score-profundidade');
+            const scoreTexturaEl = document.getElementById('score-textura');
+            const scoreMovimentoEl = document.getElementById('score-movimento');
+            const scoreParalaxeEl = document.getElementById('score-paralaxe');
+            const scoreAntispoofingEl = document.getElementById('score-antispoofing');
+            const scoreSuportePlanoEl = document.getElementById('score-suporte-plano');
+            const scoreEscalaFaceEl = document.getElementById('score-escala-face');
+            const scoreModeloLiveEl = document.getElementById('score-modelo-live');
+            const scoreModeloPrintEl = document.getElementById('score-modelo-print');
+            const scoreModeloReplayEl = document.getElementById('score-modelo-replay');
+
+            let framesCapturados = 0;
+            let framesInferidos = 0;
+            let ultimaLeituraMetricas = performance.now();
+            let latencias = [];
+            let requisicaoEmAndamento = false;
+            let modoRetorno = "metadata";
+            let facesRenderizadas = [];
+            let ultimoResultadoFaces = 0;
+            const tempoPersistenciaFacesMs = 700;
+
+            function atualizarClasseStatus(elemento, classe) {
+                elemento.classList.remove('status-ok', 'status-warn', 'status-error');
+                if (classe) {
+                    elemento.classList.add(classe);
+                }
+            }
+
+            function atualizarMetricas() {
+                const agora = performance.now();
+                const segundos = (agora - ultimaLeituraMetricas) / 1000;
+                if (segundos < 1) {
+                    return;
+                }
+
+                const latenciaMedia = latencias.length
+                    ? latencias.reduce((total, valor) => total + valor, 0) / latencias.length
+                    : 0;
+
+                fpsCapturaEl.textContent = (framesCapturados / segundos).toFixed(1);
+                fpsInferenciaEl.textContent = (framesInferidos / segundos).toFixed(1);
+                latenciaMediaEl.textContent = `${latenciaMedia.toFixed(0)} ms`;
+
+                framesCapturados = 0;
+                framesInferidos = 0;
+                latencias = [];
+                ultimaLeituraMetricas = agora;
+            }
+
+            function selecionarModo(novoModo) {
+                modoRetorno = novoModo;
+                modoMetadataBtn.classList.toggle('ativo', novoModo === "metadata");
+                modoImagemBtn.classList.toggle('ativo', novoModo === "imagem");
+                canvas.style.display = novoModo === "metadata" ? "block" : "none";
+                outputImg.style.display = novoModo === "imagem" ? "block" : "none";
+            }
+
+            function misturarBbox(bboxAtual, bboxNova, pesoNovo = 0.35) {
+                return bboxAtual.map((valor, indice) => {
+                    return valor * (1 - pesoNovo) + bboxNova[indice] * pesoNovo;
+                });
+            }
+
+            function atualizarFacesRenderizadas(faces) {
+                const agora = performance.now();
+                if (!faces || faces.length === 0) {
+                    return;
+                }
+                const anteriores = new Map(facesRenderizadas.map(face => [face.id, face]));
+                facesRenderizadas = faces.map(face => {
+                    const anterior = anteriores.get(face.id);
+                    const bbox = anterior ? misturarBbox(anterior.bbox, face.bbox) : face.bbox;
+                    return { ...face, bbox, atualizadoEm: agora };
+                });
+                ultimoResultadoFaces = agora;
+            }
+
+            function obterFacesVisiveis() {
+                const agora = performance.now();
+                facesRenderizadas = facesRenderizadas.filter(face => {
+                    return agora - face.atualizadoEm <= tempoPersistenciaFacesMs;
+                });
+                return facesRenderizadas;
+            }
+
+            function desenharFacesLocalmente(faces) {
+                faces.forEach(face => {
+                    const [x1, y1, x2, y2] = face.bbox;
+                    const cor = face.cor || "#22c55e";
+                    const texto = `${face.label} ${(face.confianca * 100).toFixed(0)}%`;
+
+                    context.lineWidth = 3;
+                    context.strokeStyle = cor;
+                    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                    context.font = "bold 16px Arial";
+                    const larguraTexto = context.measureText(texto).width + 14;
+                    const topoLabel = Math.max(0, y1 - 32);
+                    context.fillStyle = cor;
+                    context.fillRect(x1, topoLabel, larguraTexto, y1 - topoLabel);
+                    context.fillStyle = "#ffffff";
+                    context.fillText(texto, x1 + 7, Math.max(20, y1 - 10));
+                });
+            }
+
+            function renderizarCanvasMetadata() {
+                if (modoRetorno === "metadata" && video.readyState >= 2) {
+                    context.drawImage(video, 0, 0, 640, 480);
+                    desenharFacesLocalmente(obterFacesVisiveis());
+                }
+                requestAnimationFrame(renderizarCanvasMetadata);
+            }
+
+            modoMetadataBtn.addEventListener('click', () => selecionarModo("metadata"));
+            modoImagemBtn.addEventListener('click', () => selecionarModo("imagem"));
+            selecionarModo("metadata");
+            requestAnimationFrame(renderizarCanvasMetadata);
+
+            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+                .then(stream => {
+                    video.srcObject = stream;
+                    statusCameraEl.textContent = "ativa";
+                    atualizarClasseStatus(statusCameraEl, "status-ok");
+                })
+                .catch(err => {
+                    contadorDiv.innerHTML = "Erro ao acessar webcam.";
+                    statusCameraEl.textContent = "erro";
+                    atualizarClasseStatus(statusCameraEl, "status-error");
+                });
+
+            setInterval(() => {
+                if (video.srcObject && !requisicaoEmAndamento) {
+                    requisicaoEmAndamento = true;
+                    statusFilaEl.textContent = "processando";
+                    atualizarClasseStatus(statusFilaEl, "status-warn");
+                    const inicioRequisicao = performance.now();
+
+                    if (video.readyState >= 2) {
+                        context.drawImage(video, 0, 0, 640, 480);
+                    }
+                    framesCapturados += 1;
+
+                    canvas.toBlob(blob => {
+                        const formData = new FormData();
+                        formData.append('file', blob, 'frame.jpg');
+
+                        fetch(`/predict?modo=${modoRetorno}`, { method: 'POST', body: formData })
+                            .then(res => res.json())
+                            .then(data => {
+                                if(data.status === "sucesso") {
+                                    const latencia = performance.now() - inicioRequisicao;
+                                    latencias.push(latencia);
+                                    framesInferidos += 1;
+
+                                    if (modoRetorno === "imagem" && data.imagem_processada) {
+                                        outputImg.src = data.imagem_processada;
+                                    } else {
+                                        atualizarFacesRenderizadas(data.faces || []);
+                                    }
+                                    contadorDiv.innerHTML = `Rostos na cena: ${data.quantidade_rostos}`;
+                                    statusRostosEl.textContent = data.quantidade_rostos;
+                                    if (data.desafio_ativo) {
+                                        desafioAtivoEl.textContent = `${data.desafio_ativo.texto} (${data.desafio_ativo.segundos_restantes}s)`;
+                                    }
+                                    providerAtivoEl.textContent = data.provider_ativo || "--";
+                                    atualizarClasseStatus(providerAtivoEl, data.provider_ativo === "CUDA" ? "status-ok" : "status-warn");
+
+                                    if (data.resolucao) {
+                                        resolucaoFrameEl.textContent = `${data.resolucao.largura}x${data.resolucao.altura}`;
+                                    }
+
+                                    if (data.metricas) {
+                                        tempoDecodeEl.textContent = `${data.metricas.decode_ms} ms`;
+                                        tempoDeteccaoEl.textContent = `${data.metricas.deteccao_ms} ms`;
+                                        tempoLivenessEl.textContent = `${data.metricas.liveness_ms} ms`;
+                                        tempoEncodeEl.textContent = `${data.metricas.encode_ms} ms`;
+                                        tempoTotalBackendEl.textContent = `${data.metricas.total_ms} ms`;
+                                    }
+
+                                    const primeiraFace = (data.faces || [])[0];
+                                    if (data.analise_temporal && primeiraFace) {
+                                        desafioStatusEl.textContent = primeiraFace.desafio_ok ? "ok" : "pendente";
+                                        atualizarClasseStatus(desafioStatusEl, primeiraFace.desafio_ok ? "status-ok" : "status-warn");
+                                        framesTemporaisEl.textContent = `${primeiraFace.frames_analisados}/${data.analise_temporal.min_frames}`;
+                                        estabilidadeTemporalEl.textContent = primeiraFace.estavel ? "estavel" : "analisando";
+                                        atualizarClasseStatus(estabilidadeTemporalEl, primeiraFace.estavel ? "status-ok" : "status-warn");
+                                        if (primeiraFace.evidencias) {
+                                            scoreFaceEl.textContent = `${(primeiraFace.evidencias.face_detectada * 100).toFixed(0)}%`;
+                                            scoreProfundidadeEl.textContent = `${(primeiraFace.evidencias.profundidade * 100).toFixed(0)}%`;
+                                            scoreTexturaEl.textContent = `${(primeiraFace.evidencias.textura_natural * 100).toFixed(0)}%`;
+                                            scoreMovimentoEl.textContent = `${(primeiraFace.evidencias.movimento_natural * 100).toFixed(0)}%`;
+                                            scoreParalaxeEl.textContent = `${(primeiraFace.evidencias.paralaxe_3d * 100).toFixed(0)}%`;
+                                            scoreAntispoofingEl.textContent = `${(primeiraFace.evidencias.anti_spoofing * 100).toFixed(0)}%`;
+                                            scoreSuportePlanoEl.textContent = `${(primeiraFace.evidencias.suporte_plano * 100).toFixed(0)}%`;
+                                            scoreEscalaFaceEl.textContent = `${(primeiraFace.evidencias.escala_face * 100).toFixed(0)}%`;
+                                            scoreModeloLiveEl.textContent = `${(primeiraFace.evidencias.pad_model_live * 100).toFixed(0)}%`;
+                                            scoreModeloPrintEl.textContent = `${(primeiraFace.evidencias.pad_model_print * 100).toFixed(0)}%`;
+                                            scoreModeloReplayEl.textContent = `${(primeiraFace.evidencias.pad_model_replay * 100).toFixed(0)}%`;
+                                        }
+                                    } else if (data.analise_temporal) {
+                                        desafioStatusEl.textContent = "--";
+                                        atualizarClasseStatus(desafioStatusEl, "");
+                                        framesTemporaisEl.textContent = `0/${data.analise_temporal.min_frames}`;
+                                        estabilidadeTemporalEl.textContent = "--";
+                                        atualizarClasseStatus(estabilidadeTemporalEl, "");
+                                        scoreFaceEl.textContent = "0%";
+                                        scoreProfundidadeEl.textContent = "0%";
+                                        scoreTexturaEl.textContent = "0%";
+                                        scoreMovimentoEl.textContent = "0%";
+                                        scoreParalaxeEl.textContent = "0%";
+                                        scoreAntispoofingEl.textContent = "0%";
+                                        scoreSuportePlanoEl.textContent = "0%";
+                                        scoreEscalaFaceEl.textContent = "0%";
+                                        scoreModeloLiveEl.textContent = "0%";
+                                        scoreModeloPrintEl.textContent = "0%";
+                                        scoreModeloReplayEl.textContent = "0%";
+                                    }
+                                }
+                            })
+                            .catch(err => {
+                                contadorDiv.innerHTML = "Conexao perdida";
+                                statusCameraEl.textContent = "sem conexao";
+                                atualizarClasseStatus(statusCameraEl, "status-error");
+                            })
+                            .finally(() => {
+                                requisicaoEmAndamento = false;
+                                statusFilaEl.textContent = "livre";
+                                atualizarClasseStatus(statusFilaEl, "status-ok");
+                            });
+                    }, 'image/jpeg', 0.5);
+                }
+                atualizarMetricas();
+            }, 150);
+        </script>
+    </body>
+    </html>

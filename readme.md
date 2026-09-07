@@ -36,11 +36,28 @@ com InsightFace e classifica cada rosto com uma decisao principal binaria de PAD
 
 ```text
 liveness-stream/
-|-- app.py            # API FastAPI, inferencia e interface web
-|-- dockerfile        # Imagem Docker com CUDA/cuDNN
-|-- requirements.txt  # Dependencias Python
-`-- readme.md         # Documentacao do projeto
+|-- app.py                     # Entrada de compatibilidade para uvicorn/Docker
+|-- dockerfile                 # Imagem Docker com CUDA/cuDNN
+|-- requirements.txt           # Dependencias Python
+|-- readme.md                  # Documentacao do projeto
+`-- liveness_app/
+    |-- main.py                # FastAPI, endpoints e fluxo da requisicao
+    |-- config.py              # Variaveis de ambiente, thresholds e desafios
+    |-- models.py              # Carregamento InsightFace/PAD e inferencia ONNX
+    |-- core/
+    |   |-- evidence.py        # Evidencias visuais: textura, cor, plano, scores
+    |   |-- temporal.py        # Tracking por face e decisao temporal
+    |   |-- challenge.py       # Desafios ativos: pisque, vire, aproxime
+    |   |-- calibration.py     # Log CSV e leitura de calibracao
+    |   `-- utils.py           # Funcoes auxiliares numericas
+    `-- web/
+        `-- index.html         # Interface HTML/CSS/JavaScript
 ```
+
+O arquivo `app.py` foi mantido propositalmente pequeno para preservar o comando
+atual do Docker (`python3 app.py`) e o padrao `uvicorn app:app`. A logica da
+aplicacao fica separada no pacote `liveness_app`, facilitando manutencao,
+calibracao e testes.
 
 ## Pre-requisitos
 
