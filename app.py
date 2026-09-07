@@ -1,7 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import HTMLResponse
 import base64
+import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -10,6 +12,18 @@ from insightface.app import FaceAnalysis
 
 
 app = FastAPI()
+
+TEMPORAL_WINDOW_SIZE = int(os.getenv("TEMPORAL_WINDOW_SIZE", "12"))
+TEMPORAL_MIN_FRAMES = int(os.getenv("TEMPORAL_MIN_FRAMES", "5"))
+TEMPORAL_REAL_THRESHOLD = float(os.getenv("TEMPORAL_REAL_THRESHOLD", "0.70"))
+TEMPORAL_SPOOF_THRESHOLD = float(os.getenv("TEMPORAL_SPOOF_THRESHOLD", "0.45"))
+TEMPORAL_STABILITY_DELTA = float(os.getenv("TEMPORAL_STABILITY_DELTA", "0.18"))
+TEMPORAL_MATCH_IOU = float(os.getenv("TEMPORAL_MATCH_IOU", "0.30"))
+TEMPORAL_STALE_FRAMES = int(os.getenv("TEMPORAL_STALE_FRAMES", "20"))
+
+face_tracks = {}
+next_track_id = 1
+frame_sequence = 0
 
 
 def limitar(valor, minimo=0.0, maximo=1.0):
@@ -20,6 +34,104 @@ def calcular_liveness_score(variacao_profundidade, media_saturacao):
     score_profundidade = limitar((variacao_profundidade - 8.0) / 14.0)
     score_saturacao = limitar((190.0 - media_saturacao) / 80.0)
     return limitar((score_profundidade * 0.65) + (score_saturacao * 0.35))
+
+
+def calcular_iou(box_a, box_b):
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - inter_area
+    return inter_area / union if union else 0.0
+
+
+def obter_track_id(bbox, frame_atual, tracks_usados):
+    global next_track_id
+
+    melhor_track_id = None
+    melhor_iou = 0.0
+    for track_id, track in face_tracks.items():
+        if track_id in tracks_usados:
+            continue
+        iou = calcular_iou(bbox, track["bbox"])
+        if iou > melhor_iou:
+            melhor_iou = iou
+            melhor_track_id = track_id
+
+    if melhor_track_id is None or melhor_iou < TEMPORAL_MATCH_IOU:
+        melhor_track_id = next_track_id
+        next_track_id += 1
+        face_tracks[melhor_track_id] = {
+            "bbox": bbox,
+            "scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "last_seen": frame_atual,
+        }
+
+    tracks_usados.add(melhor_track_id)
+    return melhor_track_id
+
+
+def atualizar_decisao_temporal(track_id, bbox, real_score, frame_atual):
+    track = face_tracks[track_id]
+    track["bbox"] = bbox
+    track["last_seen"] = frame_atual
+    track["scores"].append(float(real_score))
+
+    scores = list(track["scores"])
+    score_medio = sum(scores) / len(scores)
+    estabilidade = max(scores) - min(scores) if scores else 1.0
+    frames_analisados = len(scores)
+    estavel = (
+        frames_analisados >= TEMPORAL_MIN_FRAMES
+        and estabilidade <= TEMPORAL_STABILITY_DELTA
+    )
+
+    if not estavel:
+        label = "INCERTO"
+        confianca = max(score_medio, 1.0 - score_medio)
+        cor_borda = (0, 255, 255)
+        cor_interface = "#facc15"
+    elif score_medio >= TEMPORAL_REAL_THRESHOLD:
+        label = "REAL"
+        confianca = score_medio
+        cor_borda = (0, 255, 0)
+        cor_interface = "#22c55e"
+    elif score_medio <= TEMPORAL_SPOOF_THRESHOLD:
+        label = "SPOOF"
+        confianca = 1.0 - score_medio
+        cor_borda = (0, 0, 255)
+        cor_interface = "#ef4444"
+    else:
+        label = "INCERTO"
+        confianca = max(score_medio, 1.0 - score_medio)
+        cor_borda = (0, 255, 255)
+        cor_interface = "#facc15"
+
+    return {
+        "label": label,
+        "confianca": confianca,
+        "real_score_medio": score_medio,
+        "frames_analisados": frames_analisados,
+        "estabilidade": estabilidade,
+        "estavel": estavel,
+        "cor_borda": cor_borda,
+        "cor_interface": cor_interface,
+    }
+
+
+def limpar_tracks_antigos(frame_atual):
+    expirados = [
+        track_id
+        for track_id, track in face_tracks.items()
+        if frame_atual - track["last_seen"] > TEMPORAL_STALE_FRAMES
+    ]
+    for track_id in expirados:
+        del face_tracks[track_id]
 
 
 ort_providers = ort.get_available_providers()
@@ -62,7 +174,11 @@ async def predict(
     file: UploadFile = File(...),
     modo: str = Query("metadata", pattern="^(metadata|imagem)$"),
 ):
+    global frame_sequence
+
     try:
+        frame_sequence += 1
+        frame_atual = frame_sequence
         inicio_total = time.perf_counter()
         request_object_content = await file.read()
 
@@ -78,11 +194,13 @@ async def predict(
         faces = app_face.get(frame)
         tempo_deteccao_ms = (time.perf_counter() - inicio_deteccao) * 1000
         faces_resultado = []
+        tracks_usados = set()
 
         inicio_liveness = time.perf_counter()
-        for indice, face in enumerate(faces, start=1):
+        for face in faces:
             box = face.bbox.astype(int)
             x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
+            bbox = [int(x1), int(y1), int(x2), int(y2)]
 
             landmarks = face.landmark_3d_68
             profundidade_nariz = landmarks[30][2]
@@ -102,32 +220,31 @@ async def predict(
             real_score = calcular_liveness_score(variacao_profundidade, media_saturacao)
             spoof_score = 1.0 - real_score
 
-            if real_score >= 0.70:
-                label = "REAL"
-                confianca = real_score
-                cor_borda = (0, 255, 0)
-                cor_interface = "#22c55e"
-            elif real_score <= 0.45:
-                label = "SPOOF / FOTO"
-                confianca = spoof_score
-                cor_borda = (0, 0, 255)
-                cor_interface = "#ef4444"
-            else:
-                label = "INCERTO"
-                confianca = max(real_score, spoof_score)
-                cor_borda = (0, 255, 255)
-                cor_interface = "#facc15"
+            track_id = obter_track_id(bbox, frame_atual, tracks_usados)
+            decisao_temporal = atualizar_decisao_temporal(
+                track_id, bbox, real_score, frame_atual
+            )
+            label = decisao_temporal["label"]
+            confianca = decisao_temporal["confianca"]
+            cor_borda = decisao_temporal["cor_borda"]
+            cor_interface = decisao_temporal["cor_interface"]
 
             texto_label = f"{label} {confianca * 100:.0f}%"
             faces_resultado.append(
                 {
-                    "id": indice,
-                    "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                    "id": track_id,
+                    "bbox": bbox,
                     "label": label,
                     "confianca": round(float(confianca), 3),
                     "score": round(float(confianca), 3),
                     "real_score": round(float(real_score), 3),
                     "spoof_score": round(float(spoof_score), 3),
+                    "real_score_medio": round(
+                        float(decisao_temporal["real_score_medio"]), 3
+                    ),
+                    "frames_analisados": decisao_temporal["frames_analisados"],
+                    "estabilidade": round(float(decisao_temporal["estabilidade"]), 3),
+                    "estavel": decisao_temporal["estavel"],
                     "cor": cor_interface,
                 }
             )
@@ -154,6 +271,7 @@ async def predict(
                     cv2.LINE_AA,
                 )
         tempo_liveness_ms = (time.perf_counter() - inicio_liveness) * 1000
+        limpar_tracks_antigos(frame_atual)
 
         frame_base64 = None
         tempo_encode_ms = 0.0
@@ -174,6 +292,14 @@ async def predict(
                 "altura": int(frame.shape[0]),
             },
             "faces": faces_resultado,
+            "analise_temporal": {
+                "janela": TEMPORAL_WINDOW_SIZE,
+                "min_frames": TEMPORAL_MIN_FRAMES,
+                "real_threshold": TEMPORAL_REAL_THRESHOLD,
+                "spoof_threshold": TEMPORAL_SPOOF_THRESHOLD,
+                "stability_delta": TEMPORAL_STABILITY_DELTA,
+                "tracks_ativos": len(face_tracks),
+            },
             "metricas": {
                 "decode_ms": round(tempo_decode_ms, 2),
                 "deteccao_ms": round(tempo_deteccao_ms, 2),
@@ -246,6 +372,8 @@ async def index():
                 <div class="status-item"><span class="status-label">Liveness</span><span class="status-value" id="tempo-liveness">0 ms</span></div>
                 <div class="status-item"><span class="status-label">Encode</span><span class="status-value" id="tempo-encode">0 ms</span></div>
                 <div class="status-item"><span class="status-label">Total backend</span><span class="status-value" id="tempo-total-backend">0 ms</span></div>
+                <div class="status-item"><span class="status-label">Frames temporais</span><span class="status-value" id="frames-temporais">0/0</span></div>
+                <div class="status-item"><span class="status-label">Estabilidade</span><span class="status-value" id="estabilidade-temporal">--</span></div>
             </div>
         </div>
 
@@ -270,6 +398,8 @@ async def index():
             const tempoLivenessEl = document.getElementById('tempo-liveness');
             const tempoEncodeEl = document.getElementById('tempo-encode');
             const tempoTotalBackendEl = document.getElementById('tempo-total-backend');
+            const framesTemporaisEl = document.getElementById('frames-temporais');
+            const estabilidadeTemporalEl = document.getElementById('estabilidade-temporal');
 
             let framesCapturados = 0;
             let framesInferidos = 0;
@@ -392,6 +522,17 @@ async def index():
                                         tempoLivenessEl.textContent = `${data.metricas.liveness_ms} ms`;
                                         tempoEncodeEl.textContent = `${data.metricas.encode_ms} ms`;
                                         tempoTotalBackendEl.textContent = `${data.metricas.total_ms} ms`;
+                                    }
+
+                                    const primeiraFace = (data.faces || [])[0];
+                                    if (data.analise_temporal && primeiraFace) {
+                                        framesTemporaisEl.textContent = `${primeiraFace.frames_analisados}/${data.analise_temporal.min_frames}`;
+                                        estabilidadeTemporalEl.textContent = primeiraFace.estavel ? "estavel" : "analisando";
+                                        atualizarClasseStatus(estabilidadeTemporalEl, primeiraFace.estavel ? "status-ok" : "status-warn");
+                                    } else if (data.analise_temporal) {
+                                        framesTemporaisEl.textContent = `0/${data.analise_temporal.min_frames}`;
+                                        estabilidadeTemporalEl.textContent = "--";
+                                        atualizarClasseStatus(estabilidadeTemporalEl, "");
                                     }
                                 }
                             })
