@@ -1152,70 +1152,93 @@ async def index():
     <head>
         <title>IA Multi-Liveness Real-Time</title>
         <style>
-            body { font-family: Arial, sans-serif; text-align: center; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
-            #container { display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
+            body { font-family: Arial, sans-serif; background: #141414; color: #fff; margin: 0; padding: 18px; }
+            h1 { margin: 0 0 14px; text-align: center; font-size: 28px; line-height: 1.15; }
+            #container { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+            #workspace { display: grid; grid-template-columns: minmax(170px, 210px) minmax(420px, 640px) minmax(170px, 210px); gap: 14px; align-items: start; width: min(1120px, 100%); }
+            #video-stage { display: flex; flex-direction: column; align-items: center; min-width: 0; }
             video { display: none; }
-            canvas, #output-img { border: 4px solid #444; border-radius: 8px; width: 640px; height: 480px; background: #000; }
+            canvas, #output-img { border: 3px solid #444; border-radius: 8px; width: 100%; max-width: 640px; aspect-ratio: 4 / 3; height: auto; background: #000; box-sizing: border-box; }
             #output-img { display: none; }
-            #contador { margin-top: 15px; font-size: 22px; color: #aaa; font-weight: bold; }
+            #contador { margin-top: 10px; font-size: 20px; color: #b8b8b8; font-weight: bold; text-align: center; }
             #modo-controle { display: flex; gap: 8px; margin: 0 0 12px; }
             .modo-btn { border: 1px solid #3a3a3a; border-radius: 6px; background: #252525; color: #d4d4d4; cursor: pointer; font-weight: 700; padding: 9px 14px; }
             .modo-btn.ativo { background: #0f766e; border-color: #14b8a6; color: #fff; }
-            #status-panel { width: 640px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
-            .status-item { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 10px 12px; text-align: left; }
-            .status-label { display: block; color: #9ca3af; font-size: 12px; margin-bottom: 4px; }
-            .status-value { display: block; color: #f5f5f5; font-size: 18px; font-weight: 700; line-height: 1.1; }
+            .side-panel { display: flex; flex-direction: column; gap: 7px; padding-top: 46px; }
+            .panel-title { color: #d4d4d4; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 3px; }
+            .status-item { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-height: 24px; border-bottom: 1px solid #2d2d2d; text-align: left; }
+            .status-label { color: #9ca3af; font-size: 12px; line-height: 1.2; }
+            .status-value { color: #f5f5f5; font-size: 15px; font-weight: 800; line-height: 1.2; text-align: right; overflow-wrap: anywhere; }
             .status-ok { color: #22c55e; }
             .status-warn { color: #facc15; }
             .status-error { color: #ef4444; }
-            @media (max-width: 720px) {
-                canvas, #output-img, #status-panel { width: 100%; max-width: 640px; }
-                canvas, #output-img { height: auto; }
-                #status-panel { grid-template-columns: repeat(2, 1fr); }
+            @media (max-width: 980px) {
+                #workspace { grid-template-columns: 1fr; width: min(680px, 100%); }
+                .side-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 14px; padding-top: 0; width: 100%; order: 2; }
+                #video-stage { order: 1; }
+                .panel-title { grid-column: 1 / -1; }
+                .status-item { min-height: 22px; }
+            }
+            @media (max-width: 560px) {
+                body { padding: 12px; }
+                h1 { font-size: 22px; }
+                .side-panel { grid-template-columns: 1fr; }
+                .status-value { font-size: 14px; }
             }
         </style>
     </head>
     <body>
         <h1>Deteccao de Vivacidade Multi-Rosto (GPU Ativa)</h1>
         <div id="container">
-            <div id="modo-controle">
-                <button class="modo-btn ativo" id="modo-metadata" type="button">Metadados</button>
-                <button class="modo-btn" id="modo-imagem" type="button">Imagem completa</button>
-            </div>
-            <video id="video" width="640" height="480" autoplay></video>
-            <canvas id="canvas" width="640" height="480"></canvas>
-            <img id="output-img" />
-            <div id="contador">Detectando ambiente...</div>
-            <div id="status-panel">
-                <div class="status-item"><span class="status-label">FPS captura</span><span class="status-value" id="fps-captura">0</span></div>
-                <div class="status-item"><span class="status-label">FPS inferencia</span><span class="status-value" id="fps-inferencia">0</span></div>
-                <div class="status-item"><span class="status-label">Latencia media</span><span class="status-value" id="latencia-media">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Rostos</span><span class="status-value" id="status-rostos">0</span></div>
-                <div class="status-item"><span class="status-label">Tipo provavel</span><span class="status-value" id="tipo-apresentacao">--</span></div>
-                <div class="status-item"><span class="status-label">Desafio</span><span class="status-value" id="desafio-ativo">--</span></div>
-                <div class="status-item"><span class="status-label">Desafio status</span><span class="status-value" id="desafio-status">--</span></div>
-                <div class="status-item"><span class="status-label">Provider</span><span class="status-value" id="provider-ativo">--</span></div>
-                <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
-                <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
-                <div class="status-item"><span class="status-label">Fila</span><span class="status-value" id="status-fila">livre</span></div>
-                <div class="status-item"><span class="status-label">Decode</span><span class="status-value" id="tempo-decode">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Deteccao</span><span class="status-value" id="tempo-deteccao">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Liveness</span><span class="status-value" id="tempo-liveness">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Encode</span><span class="status-value" id="tempo-encode">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Total backend</span><span class="status-value" id="tempo-total-backend">0 ms</span></div>
-                <div class="status-item"><span class="status-label">Frames temporais</span><span class="status-value" id="frames-temporais">0/0</span></div>
-                <div class="status-item"><span class="status-label">Estabilidade</span><span class="status-value" id="estabilidade-temporal">--</span></div>
-                <div class="status-item"><span class="status-label">Face detectada</span><span class="status-value" id="score-face">0%</span></div>
-                <div class="status-item"><span class="status-label">Profundidade</span><span class="status-value" id="score-profundidade">0%</span></div>
-                <div class="status-item"><span class="status-label">Textura natural</span><span class="status-value" id="score-textura">0%</span></div>
-                <div class="status-item"><span class="status-label">Movimento natural</span><span class="status-value" id="score-movimento">0%</span></div>
-                <div class="status-item"><span class="status-label">Paralaxe 3D</span><span class="status-value" id="score-paralaxe">0%</span></div>
-                <div class="status-item"><span class="status-label">Anti-spoofing</span><span class="status-value" id="score-antispoofing">0%</span></div>
-                <div class="status-item"><span class="status-label">Suporte plano</span><span class="status-value" id="score-suporte-plano">0%</span></div>
-                <div class="status-item"><span class="status-label">Escala da face</span><span class="status-value" id="score-escala-face">0%</span></div>
-                <div class="status-item"><span class="status-label">Modelo live</span><span class="status-value" id="score-modelo-live">0%</span></div>
-                <div class="status-item"><span class="status-label">Modelo print</span><span class="status-value" id="score-modelo-print">0%</span></div>
-                <div class="status-item"><span class="status-label">Modelo replay</span><span class="status-value" id="score-modelo-replay">0%</span></div>
+            <div id="workspace">
+                <aside class="side-panel" id="status-left">
+                    <div class="panel-title">Sistema</div>
+                    <div class="status-item"><span class="status-label">Provider</span><span class="status-value" id="provider-ativo">--</span></div>
+                    <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
+                    <div class="status-item"><span class="status-label">Fila</span><span class="status-value" id="status-fila">livre</span></div>
+                    <div class="status-item"><span class="status-label">FPS captura</span><span class="status-value" id="fps-captura">0</span></div>
+                    <div class="status-item"><span class="status-label">FPS inferencia</span><span class="status-value" id="fps-inferencia">0</span></div>
+                    <div class="status-item"><span class="status-label">Latencia</span><span class="status-value" id="latencia-media">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
+                    <div class="status-item"><span class="status-label">Rostos</span><span class="status-value" id="status-rostos">0</span></div>
+                    <div class="panel-title">Backend</div>
+                    <div class="status-item"><span class="status-label">Decode</span><span class="status-value" id="tempo-decode">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Deteccao</span><span class="status-value" id="tempo-deteccao">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Liveness</span><span class="status-value" id="tempo-liveness">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Encode</span><span class="status-value" id="tempo-encode">0 ms</span></div>
+                    <div class="status-item"><span class="status-label">Total</span><span class="status-value" id="tempo-total-backend">0 ms</span></div>
+                </aside>
+
+                <main id="video-stage">
+                    <div id="modo-controle">
+                        <button class="modo-btn ativo" id="modo-metadata" type="button">Metadados</button>
+                        <button class="modo-btn" id="modo-imagem" type="button">Imagem completa</button>
+                    </div>
+                    <video id="video" width="640" height="480" autoplay></video>
+                    <canvas id="canvas" width="640" height="480"></canvas>
+                    <img id="output-img" />
+                    <div id="contador">Detectando ambiente...</div>
+                </main>
+
+                <aside class="side-panel" id="status-right">
+                    <div class="panel-title">Liveness</div>
+                    <div class="status-item"><span class="status-label">Desafio</span><span class="status-value" id="desafio-ativo">--</span></div>
+                    <div class="status-item"><span class="status-label">Desafio status</span><span class="status-value" id="desafio-status">--</span></div>
+                    <div class="status-item"><span class="status-label">Frames</span><span class="status-value" id="frames-temporais">0/0</span></div>
+                    <div class="status-item"><span class="status-label">Estabilidade</span><span class="status-value" id="estabilidade-temporal">--</span></div>
+                    <div class="status-item"><span class="status-label">Face detectada</span><span class="status-value" id="score-face">0%</span></div>
+                    <div class="status-item"><span class="status-label">Profundidade</span><span class="status-value" id="score-profundidade">0%</span></div>
+                    <div class="status-item"><span class="status-label">Textura</span><span class="status-value" id="score-textura">0%</span></div>
+                    <div class="status-item"><span class="status-label">Movimento</span><span class="status-value" id="score-movimento">0%</span></div>
+                    <div class="status-item"><span class="status-label">Paralaxe 3D</span><span class="status-value" id="score-paralaxe">0%</span></div>
+                    <div class="status-item"><span class="status-label">Anti-spoofing</span><span class="status-value" id="score-antispoofing">0%</span></div>
+                    <div class="status-item"><span class="status-label">Suporte plano</span><span class="status-value" id="score-suporte-plano">0%</span></div>
+                    <div class="status-item"><span class="status-label">Escala face</span><span class="status-value" id="score-escala-face">0%</span></div>
+                    <div class="panel-title">Modelo PAD</div>
+                    <div class="status-item"><span class="status-label">Live</span><span class="status-value" id="score-modelo-live">0%</span></div>
+                    <div class="status-item"><span class="status-label">Print</span><span class="status-value" id="score-modelo-print">0%</span></div>
+                    <div class="status-item"><span class="status-label">Replay</span><span class="status-value" id="score-modelo-replay">0%</span></div>
+                </aside>
             </div>
         </div>
 
@@ -1231,7 +1254,6 @@ async def index():
             const fpsInferenciaEl = document.getElementById('fps-inferencia');
             const latenciaMediaEl = document.getElementById('latencia-media');
             const statusRostosEl = document.getElementById('status-rostos');
-            const tipoApresentacaoEl = document.getElementById('tipo-apresentacao');
             const desafioAtivoEl = document.getElementById('desafio-ativo');
             const desafioStatusEl = document.getElementById('desafio-status');
             const providerAtivoEl = document.getElementById('provider-ativo');
@@ -1385,7 +1407,6 @@ async def index():
 
                                     const primeiraFace = (data.faces || [])[0];
                                     if (data.analise_temporal && primeiraFace) {
-                                        tipoApresentacaoEl.textContent = primeiraFace.tipo_apresentacao || "--";
                                         desafioStatusEl.textContent = primeiraFace.desafio_ok ? "ok" : "pendente";
                                         atualizarClasseStatus(desafioStatusEl, primeiraFace.desafio_ok ? "status-ok" : "status-warn");
                                         framesTemporaisEl.textContent = `${primeiraFace.frames_analisados}/${data.analise_temporal.min_frames}`;
@@ -1405,7 +1426,6 @@ async def index():
                                             scoreModeloReplayEl.textContent = `${(primeiraFace.evidencias.pad_model_replay * 100).toFixed(0)}%`;
                                         }
                                     } else if (data.analise_temporal) {
-                                        tipoApresentacaoEl.textContent = "--";
                                         desafioStatusEl.textContent = "--";
                                         atualizarClasseStatus(desafioStatusEl, "");
                                         framesTemporaisEl.textContent = `0/${data.analise_temporal.min_frames}`;
