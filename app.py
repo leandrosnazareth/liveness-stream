@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse
 import base64
+import time
 
 import cv2
 import numpy as np
@@ -59,16 +60,23 @@ async def health():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
+        inicio_total = time.perf_counter()
         request_object_content = await file.read()
+
+        inicio_decode = time.perf_counter()
         np_array = np.frombuffer(request_object_content, np.uint8)
         frame = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+        tempo_decode_ms = (time.perf_counter() - inicio_decode) * 1000
 
         if frame is None:
             return {"status": "erro", "mensagem": "Frame invalido"}
 
+        inicio_deteccao = time.perf_counter()
         faces = app_face.get(frame)
+        tempo_deteccao_ms = (time.perf_counter() - inicio_deteccao) * 1000
         faces_resultado = []
 
+        inicio_liveness = time.perf_counter()
         for indice, face in enumerate(faces, start=1):
             box = face.bbox.astype(int)
             x1, y1, x2, y2 = box[0], box[1], box[2], box[3]
@@ -134,9 +142,13 @@ async def predict(file: UploadFile = File(...)):
                 2,
                 cv2.LINE_AA,
             )
+        tempo_liveness_ms = (time.perf_counter() - inicio_liveness) * 1000
 
+        inicio_encode = time.perf_counter()
         _, buffer = cv2.imencode(".jpg", frame)
         frame_base64 = base64.b64encode(buffer).decode("utf-8")
+        tempo_encode_ms = (time.perf_counter() - inicio_encode) * 1000
+        tempo_total_ms = (time.perf_counter() - inicio_total) * 1000
 
         return {
             "status": "sucesso",
@@ -147,6 +159,13 @@ async def predict(file: UploadFile = File(...)):
                 "altura": int(frame.shape[0]),
             },
             "faces": faces_resultado,
+            "metricas": {
+                "decode_ms": round(tempo_decode_ms, 2),
+                "deteccao_ms": round(tempo_deteccao_ms, 2),
+                "liveness_ms": round(tempo_liveness_ms, 2),
+                "encode_ms": round(tempo_encode_ms, 2),
+                "total_ms": round(tempo_total_ms, 2),
+            },
             "imagem_processada": f"data:image/jpeg;base64,{frame_base64}",
         }
 
@@ -197,6 +216,11 @@ async def index():
                 <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
                 <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
                 <div class="status-item"><span class="status-label">Fila</span><span class="status-value" id="status-fila">livre</span></div>
+                <div class="status-item"><span class="status-label">Decode</span><span class="status-value" id="tempo-decode">0 ms</span></div>
+                <div class="status-item"><span class="status-label">Deteccao</span><span class="status-value" id="tempo-deteccao">0 ms</span></div>
+                <div class="status-item"><span class="status-label">Liveness</span><span class="status-value" id="tempo-liveness">0 ms</span></div>
+                <div class="status-item"><span class="status-label">Encode</span><span class="status-value" id="tempo-encode">0 ms</span></div>
+                <div class="status-item"><span class="status-label">Total backend</span><span class="status-value" id="tempo-total-backend">0 ms</span></div>
             </div>
         </div>
 
@@ -214,6 +238,11 @@ async def index():
             const resolucaoFrameEl = document.getElementById('resolucao-frame');
             const statusCameraEl = document.getElementById('status-camera');
             const statusFilaEl = document.getElementById('status-fila');
+            const tempoDecodeEl = document.getElementById('tempo-decode');
+            const tempoDeteccaoEl = document.getElementById('tempo-deteccao');
+            const tempoLivenessEl = document.getElementById('tempo-liveness');
+            const tempoEncodeEl = document.getElementById('tempo-encode');
+            const tempoTotalBackendEl = document.getElementById('tempo-total-backend');
 
             let framesCapturados = 0;
             let framesInferidos = 0;
@@ -291,6 +320,14 @@ async def index():
 
                                     if (data.resolucao) {
                                         resolucaoFrameEl.textContent = `${data.resolucao.largura}x${data.resolucao.altura}`;
+                                    }
+
+                                    if (data.metricas) {
+                                        tempoDecodeEl.textContent = `${data.metricas.decode_ms} ms`;
+                                        tempoDeteccaoEl.textContent = `${data.metricas.deteccao_ms} ms`;
+                                        tempoLivenessEl.textContent = `${data.metricas.liveness_ms} ms`;
+                                        tempoEncodeEl.textContent = `${data.metricas.encode_ms} ms`;
+                                        tempoTotalBackendEl.textContent = `${data.metricas.total_ms} ms`;
                                     }
                                 }
                             })
