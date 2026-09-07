@@ -22,7 +22,7 @@ TEMPORAL_SPOOF_THRESHOLD = float(os.getenv("TEMPORAL_SPOOF_THRESHOLD", "0.45"))
 TEMPORAL_STABILITY_DELTA = float(os.getenv("TEMPORAL_STABILITY_DELTA", "0.18"))
 TEMPORAL_MATCH_IOU = float(os.getenv("TEMPORAL_MATCH_IOU", "0.30"))
 TEMPORAL_STALE_FRAMES = int(os.getenv("TEMPORAL_STALE_FRAMES", "20"))
-PAD_REAL_THRESHOLD = float(os.getenv("PAD_REAL_THRESHOLD", "0.78"))
+PAD_REAL_THRESHOLD = float(os.getenv("PAD_REAL_THRESHOLD", "0.72"))
 PAD_SPOOF_THRESHOLD = float(os.getenv("PAD_SPOOF_THRESHOLD", "0.42"))
 PAD_MIN_MOTION_SCORE = float(os.getenv("PAD_MIN_MOTION_SCORE", "0.18"))
 PAD_STRONG_ATTACK_SCORE = float(os.getenv("PAD_STRONG_ATTACK_SCORE", "0.62"))
@@ -51,7 +51,7 @@ ACTIVE_CHALLENGE_ENABLED = (
     os.getenv("ACTIVE_CHALLENGE_ENABLED", "true").lower() == "true"
 )
 ACTIVE_CHALLENGE_SECONDS = int(os.getenv("ACTIVE_CHALLENGE_SECONDS", "12"))
-ACTIVE_CHALLENGE_MIN_SCORE = float(os.getenv("ACTIVE_CHALLENGE_MIN_SCORE", "0.55"))
+ACTIVE_CHALLENGE_MIN_SCORE = float(os.getenv("ACTIVE_CHALLENGE_MIN_SCORE", "0.45"))
 
 CHALLENGES = [
     ("PISQUE", "Pisque"),
@@ -756,12 +756,12 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     face_real_grande_com_oclusao = (
         escala_face_media >= PAD_LARGE_REAL_FACE_SCALE
         and profundidade_media >= 0.35
-        and textura_media >= 0.30
+        and textura_media >= 0.24
         and cor_media >= 0.25
         and suporte_plano_media < PAD_FLAT_SUPPORT_SCORE
         and foto_media < 0.80
         and tela_media < 0.80
-        and score_medio >= 0.35
+        and score_medio >= 0.30
         and (paralaxe_media >= 0.12 or desafio_media >= ACTIVE_CHALLENGE_MIN_SCORE)
     )
     evidencia_temporal_forte_real = (
@@ -807,7 +807,7 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     elif face_real_grande_com_oclusao:
         label = "REAL"
         tipo_apresentacao = "PRESENCA_FISICA_PARCIAL"
-        confianca = limitar(max(score_medio, 0.68))
+        confianca = limitar(max(score_medio, 0.72))
         cor_borda = (0, 255, 0)
         cor_interface = "#22c55e"
     elif pad_print_media >= PAD_MODEL_ATTACK_THRESHOLD and contexto_apresentacao_media:
