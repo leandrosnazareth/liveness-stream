@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import HTMLResponse
 import base64
 import time
@@ -58,7 +58,10 @@ async def health():
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
+async def predict(
+    file: UploadFile = File(...),
+    modo: str = Query("metadata", pattern="^(metadata|imagem)$"),
+):
     try:
         inicio_total = time.perf_counter()
         request_object_content = await file.read()
@@ -103,14 +106,17 @@ async def predict(file: UploadFile = File(...)):
                 label = "REAL"
                 confianca = real_score
                 cor_borda = (0, 255, 0)
+                cor_interface = "#22c55e"
             elif real_score <= 0.45:
                 label = "SPOOF / FOTO"
                 confianca = spoof_score
                 cor_borda = (0, 0, 255)
+                cor_interface = "#ef4444"
             else:
                 label = "INCERTO"
                 confianca = max(real_score, spoof_score)
                 cor_borda = (0, 255, 255)
+                cor_interface = "#facc15"
 
             texto_label = f"{label} {confianca * 100:.0f}%"
             faces_resultado.append(
@@ -119,39 +125,48 @@ async def predict(file: UploadFile = File(...)):
                     "bbox": [int(x1), int(y1), int(x2), int(y2)],
                     "label": label,
                     "confianca": round(float(confianca), 3),
+                    "score": round(float(confianca), 3),
                     "real_score": round(float(real_score), 3),
                     "spoof_score": round(float(spoof_score), 3),
+                    "cor": cor_interface,
                 }
             )
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), cor_borda, 3)
+            if modo == "imagem":
+                cv2.rectangle(frame, (x1, y1), (x2, y2), cor_borda, 3)
 
-            texto_tamanho, _ = cv2.getTextSize(
-                texto_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-            )
-            largura_label = texto_tamanho[0] + 14
-            topo_label = max(0, y1 - 32)
-            cv2.rectangle(frame, (x1, topo_label), (x1 + largura_label, y1), cor_borda, -1)
-            cv2.putText(
-                frame,
-                texto_label,
-                (x1 + 7, max(22, y1 - 9)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+                texto_tamanho, _ = cv2.getTextSize(
+                    texto_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+                )
+                largura_label = texto_tamanho[0] + 14
+                topo_label = max(0, y1 - 32)
+                cv2.rectangle(
+                    frame, (x1, topo_label), (x1 + largura_label, y1), cor_borda, -1
+                )
+                cv2.putText(
+                    frame,
+                    texto_label,
+                    (x1 + 7, max(22, y1 - 9)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
         tempo_liveness_ms = (time.perf_counter() - inicio_liveness) * 1000
 
+        frame_base64 = None
+        tempo_encode_ms = 0.0
         inicio_encode = time.perf_counter()
-        _, buffer = cv2.imencode(".jpg", frame)
-        frame_base64 = base64.b64encode(buffer).decode("utf-8")
-        tempo_encode_ms = (time.perf_counter() - inicio_encode) * 1000
+        if modo == "imagem":
+            _, buffer = cv2.imencode(".jpg", frame)
+            frame_base64 = base64.b64encode(buffer).decode("utf-8")
+            tempo_encode_ms = (time.perf_counter() - inicio_encode) * 1000
         tempo_total_ms = (time.perf_counter() - inicio_total) * 1000
 
-        return {
+        resposta = {
             "status": "sucesso",
+            "modo": modo,
             "quantidade_rostos": len(faces),
             "provider_ativo": provider_ativo,
             "resolucao": {
@@ -166,8 +181,10 @@ async def predict(file: UploadFile = File(...)):
                 "encode_ms": round(tempo_encode_ms, 2),
                 "total_ms": round(tempo_total_ms, 2),
             },
-            "imagem_processada": f"data:image/jpeg;base64,{frame_base64}",
         }
+        if frame_base64 is not None:
+            resposta["imagem_processada"] = f"data:image/jpeg;base64,{frame_base64}"
+        return resposta
 
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
@@ -183,9 +200,13 @@ async def index():
         <style>
             body { font-family: Arial, sans-serif; text-align: center; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
             #container { display: flex; flex-direction: column; align-items: center; margin-top: 10px; }
-            video, canvas { display: none; }
-            #output-img { border: 4px solid #444; border-radius: 8px; width: 640px; height: 480px; background: #000; }
+            video { display: none; }
+            canvas, #output-img { border: 4px solid #444; border-radius: 8px; width: 640px; height: 480px; background: #000; }
+            #output-img { display: none; }
             #contador { margin-top: 15px; font-size: 22px; color: #aaa; font-weight: bold; }
+            #modo-controle { display: flex; gap: 8px; margin: 0 0 12px; }
+            .modo-btn { border: 1px solid #3a3a3a; border-radius: 6px; background: #252525; color: #d4d4d4; cursor: pointer; font-weight: 700; padding: 9px 14px; }
+            .modo-btn.ativo { background: #0f766e; border-color: #14b8a6; color: #fff; }
             #status-panel { width: 640px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
             .status-item { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 10px 12px; text-align: left; }
             .status-label { display: block; color: #9ca3af; font-size: 12px; margin-bottom: 4px; }
@@ -194,8 +215,8 @@ async def index():
             .status-warn { color: #facc15; }
             .status-error { color: #ef4444; }
             @media (max-width: 720px) {
-                #output-img, #status-panel { width: 100%; max-width: 640px; }
-                #output-img { height: auto; }
+                canvas, #output-img, #status-panel { width: 100%; max-width: 640px; }
+                canvas, #output-img { height: auto; }
                 #status-panel { grid-template-columns: repeat(2, 1fr); }
             }
         </style>
@@ -203,6 +224,10 @@ async def index():
     <body>
         <h1>Deteccao de Vivacidade Multi-Rosto (GPU Ativa)</h1>
         <div id="container">
+            <div id="modo-controle">
+                <button class="modo-btn ativo" id="modo-metadata" type="button">Metadados</button>
+                <button class="modo-btn" id="modo-imagem" type="button">Imagem completa</button>
+            </div>
             <video id="video" width="640" height="480" autoplay></video>
             <canvas id="canvas" width="640" height="480"></canvas>
             <img id="output-img" />
@@ -230,6 +255,8 @@ async def index():
             const context = canvas.getContext('2d');
             const outputImg = document.getElementById('output-img');
             const contadorDiv = document.getElementById('contador');
+            const modoMetadataBtn = document.getElementById('modo-metadata');
+            const modoImagemBtn = document.getElementById('modo-imagem');
             const fpsCapturaEl = document.getElementById('fps-captura');
             const fpsInferenciaEl = document.getElementById('fps-inferencia');
             const latenciaMediaEl = document.getElementById('latencia-media');
@@ -249,6 +276,7 @@ async def index():
             let ultimaLeituraMetricas = performance.now();
             let latencias = [];
             let requisicaoEmAndamento = false;
+            let modoRetorno = "metadata";
 
             function atualizarClasseStatus(elemento, classe) {
                 elemento.classList.remove('status-ok', 'status-warn', 'status-error');
@@ -278,6 +306,38 @@ async def index():
                 ultimaLeituraMetricas = agora;
             }
 
+            function selecionarModo(novoModo) {
+                modoRetorno = novoModo;
+                modoMetadataBtn.classList.toggle('ativo', novoModo === "metadata");
+                modoImagemBtn.classList.toggle('ativo', novoModo === "imagem");
+                canvas.style.display = novoModo === "metadata" ? "block" : "none";
+                outputImg.style.display = novoModo === "imagem" ? "block" : "none";
+            }
+
+            function desenharFacesLocalmente(faces) {
+                faces.forEach(face => {
+                    const [x1, y1, x2, y2] = face.bbox;
+                    const cor = face.cor || "#22c55e";
+                    const texto = `${face.label} ${(face.confianca * 100).toFixed(0)}%`;
+
+                    context.lineWidth = 3;
+                    context.strokeStyle = cor;
+                    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                    context.font = "bold 16px Arial";
+                    const larguraTexto = context.measureText(texto).width + 14;
+                    const topoLabel = Math.max(0, y1 - 32);
+                    context.fillStyle = cor;
+                    context.fillRect(x1, topoLabel, larguraTexto, y1 - topoLabel);
+                    context.fillStyle = "#ffffff";
+                    context.fillText(texto, x1 + 7, Math.max(20, y1 - 10));
+                });
+            }
+
+            modoMetadataBtn.addEventListener('click', () => selecionarModo("metadata"));
+            modoImagemBtn.addEventListener('click', () => selecionarModo("imagem"));
+            selecionarModo("metadata");
+
             navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
                 .then(stream => {
                     video.srcObject = stream;
@@ -304,7 +364,7 @@ async def index():
                         const formData = new FormData();
                         formData.append('file', blob, 'frame.jpg');
 
-                        fetch('/predict', { method: 'POST', body: formData })
+                        fetch(`/predict?modo=${modoRetorno}`, { method: 'POST', body: formData })
                             .then(res => res.json())
                             .then(data => {
                                 if(data.status === "sucesso") {
@@ -312,7 +372,11 @@ async def index():
                                     latencias.push(latencia);
                                     framesInferidos += 1;
 
-                                    outputImg.src = data.imagem_processada;
+                                    if (modoRetorno === "imagem" && data.imagem_processada) {
+                                        outputImg.src = data.imagem_processada;
+                                    } else {
+                                        desenharFacesLocalmente(data.faces || []);
+                                    }
                                     contadorDiv.innerHTML = `Rostos na cena: ${data.quantidade_rostos}`;
                                     statusRostosEl.textContent = data.quantidade_rostos;
                                     providerAtivoEl.textContent = data.provider_ativo || "--";
