@@ -22,9 +22,15 @@ TEMPORAL_MATCH_IOU = float(os.getenv("TEMPORAL_MATCH_IOU", "0.30"))
 TEMPORAL_STALE_FRAMES = int(os.getenv("TEMPORAL_STALE_FRAMES", "20"))
 PAD_REAL_THRESHOLD = float(os.getenv("PAD_REAL_THRESHOLD", "0.78"))
 PAD_SPOOF_THRESHOLD = float(os.getenv("PAD_SPOOF_THRESHOLD", "0.42"))
-PAD_MIN_MOTION_SCORE = float(os.getenv("PAD_MIN_MOTION_SCORE", "0.25"))
+PAD_MIN_MOTION_SCORE = float(os.getenv("PAD_MIN_MOTION_SCORE", "0.18"))
 PAD_STRONG_ATTACK_SCORE = float(os.getenv("PAD_STRONG_ATTACK_SCORE", "0.62"))
 PAD_FLAT_SUPPORT_SCORE = float(os.getenv("PAD_FLAT_SUPPORT_SCORE", "0.48"))
+PAD_MIN_REAL_FACE_SCALE = float(os.getenv("PAD_MIN_REAL_FACE_SCALE", "0.23"))
+PAD_LARGE_REAL_FACE_SCALE = float(os.getenv("PAD_LARGE_REAL_FACE_SCALE", "0.30"))
+PAD_MODEL_PATH = os.getenv("PAD_MODEL_PATH", "/app/models/minifasnet_v2.onnx")
+PAD_MODEL_ENABLED = os.getenv("PAD_MODEL_ENABLED", "true").lower() == "true"
+PAD_MODEL_REAL_THRESHOLD = float(os.getenv("PAD_MODEL_REAL_THRESHOLD", "0.72"))
+PAD_MODEL_ATTACK_THRESHOLD = float(os.getenv("PAD_MODEL_ATTACK_THRESHOLD", "0.55"))
 
 face_tracks = {}
 next_track_id = 1
@@ -66,6 +72,9 @@ def calcular_suporte_plano(frame, bbox):
     x1, y1, x2, y2 = bbox
     centro_x = (x1 + x2) / 2.0
     centro_y = (y1 + y2) / 2.0
+    largura_face = max(1, x2 - x1)
+    altura_face = max(1, y2 - y1)
+    area_face = largura_face * altura_face
     area_frame = max(1, largura * altura)
 
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -93,6 +102,21 @@ def calcular_suporte_plano(frame, bbox):
         if not (rx <= centro_x <= rx + rw and ry <= centro_y <= ry + rh):
             continue
         if rx <= 3 or ry <= 3 or rx + rw >= largura - 3 or ry + rh >= altura - 3:
+            continue
+
+        overlap_x1 = max(x1, rx)
+        overlap_y1 = max(y1, ry)
+        overlap_x2 = min(x2, rx + rw)
+        overlap_y2 = min(y2, ry + rh)
+        overlap = max(0, overlap_x2 - overlap_x1) * max(0, overlap_y2 - overlap_y1)
+        proporcao_face_no_suporte = overlap / max(1, area_face)
+        suporte_cobre_face = (
+            rx <= x1 + largura_face * 0.15
+            and ry <= y1 + altura_face * 0.20
+            and rx + rw >= x2 - largura_face * 0.15
+            and ry + rh >= y2 - altura_face * 0.15
+        )
+        if proporcao_face_no_suporte < 0.62 or not suporte_cobre_face:
             continue
 
         area_retangulo = max(1, rw * rh)
@@ -134,19 +158,102 @@ def calcular_suporte_plano(frame, bbox):
 
     if entorno.size > 0 and rosto.size > 0:
         entorno_hsv = cv2.cvtColor(entorno, cv2.COLOR_BGR2HSV)
-        rosto_area = max(1, rosto.shape[0] * rosto.shape[1])
-        entorno_area = max(1, entorno.shape[0] * entorno.shape[1] - rosto_area)
-        pixels_papel = np.count_nonzero(
+        mascara_entorno = (
             (entorno_hsv[:, :, 1] < 70) & (entorno_hsv[:, :, 2] > 155)
-        )
-        proporcao_papel = limitar((pixels_papel - rosto_area) / entorno_area)
-        face_area_relativa = rosto_area / max(1, (ex2 - ex1) * (ey2 - ey1))
-        score_entorno = normalizar_intervalo(proporcao_papel, 0.38, 0.82) * (
-            1.0 - normalizar_intervalo(face_area_relativa, 0.42, 0.72)
-        )
+        ).astype(np.uint8)
+        rx1, ry1 = x1_c - ex1, y1_c - ey1
+        rx2, ry2 = x2_c - ex1, y2_c - ey1
+
+        topo = mascara_entorno[: max(0, ry1), :]
+        base = mascara_entorno[min(mascara_entorno.shape[0], ry2) :, :]
+        esquerda = mascara_entorno[:, : max(0, rx1)]
+        direita = mascara_entorno[:, min(mascara_entorno.shape[1], rx2) :]
+
+        proporcoes_lados = [
+            float(np.mean(regiao)) if regiao.size else 0.0
+            for regiao in (topo, base, esquerda, direita)
+        ]
+        lados_com_papel = sum(1 for valor in proporcoes_lados if valor >= 0.38)
+        papel_cercando_face = min(proporcoes_lados) if lados_com_papel >= 3 else 0.0
+        score_entorno = normalizar_intervalo(papel_cercando_face, 0.38, 0.78)
         melhor_score = max(melhor_score, score_entorno)
 
     return melhor_score
+
+
+def softmax(valores):
+    valores = np.asarray(valores, dtype=np.float32)
+    valores = valores - np.max(valores)
+    exp = np.exp(valores)
+    soma = np.sum(exp)
+    return exp / soma if soma else exp
+
+
+def recortar_face_expandida(frame, bbox, escala=2.7):
+    altura, largura = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    largura_face = max(1, x2 - x1)
+    altura_face = max(1, y2 - y1)
+    centro_x = (x1 + x2) / 2.0
+    centro_y = (y1 + y2) / 2.0
+    lado = max(largura_face, altura_face) * escala
+
+    nx1 = int(max(0, centro_x - lado / 2.0))
+    ny1 = int(max(0, centro_y - lado / 2.0))
+    nx2 = int(min(largura, centro_x + lado / 2.0))
+    ny2 = int(min(altura, centro_y + lado / 2.0))
+    crop = frame[ny1:ny2, nx1:nx2]
+    return crop if crop.size else None
+
+
+def inferir_modelo_pad(frame, bbox):
+    if not pad_model_loaded or pad_session is None:
+        return {
+            "pad_model_live": 0.0,
+            "pad_model_print": 0.0,
+            "pad_model_replay": 0.0,
+            "pad_model_attack": 0.0,
+            "pad_model_usado": False,
+        }
+
+    crop = recortar_face_expandida(frame, bbox)
+    if crop is None:
+        return {
+            "pad_model_live": 0.0,
+            "pad_model_print": 0.0,
+            "pad_model_replay": 0.0,
+            "pad_model_attack": 0.0,
+            "pad_model_usado": False,
+        }
+
+    entrada = cv2.resize(crop, (80, 80)).astype(np.float32) / 255.0
+    entrada = np.transpose(entrada, (2, 0, 1))[None, :, :, :]
+    saida = pad_session.run(None, {pad_input_name: entrada})[0]
+    probabilidades = np.asarray(saida).reshape(-1)
+    if probabilidades.size < 3:
+        return {
+            "pad_model_live": 0.0,
+            "pad_model_print": 0.0,
+            "pad_model_replay": 0.0,
+            "pad_model_attack": 0.0,
+            "pad_model_usado": False,
+        }
+
+    if not np.isclose(float(np.sum(probabilidades[:3])), 1.0, atol=0.08):
+        probabilidades = softmax(probabilidades[:3])
+    else:
+        probabilidades = probabilidades[:3]
+
+    live = float(probabilidades[0])
+    print_attack = float(probabilidades[1])
+    replay_attack = float(probabilidades[2])
+    return {
+        "pad_model_live": limitar(live),
+        "pad_model_print": limitar(print_attack),
+        "pad_model_replay": limitar(replay_attack),
+        "pad_model_attack": limitar(print_attack + replay_attack),
+        "pad_model_usado": True,
+    }
 
 
 def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
@@ -154,6 +261,11 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
     y1_c, y2_c = max(0, y1), min(frame.shape[0], y2)
     x1_c, x2_c = max(0, x1), min(frame.shape[1], x2)
     rosto_recortado = frame[y1_c:y2_c, x1_c:x2_c]
+    largura_face = max(1, x2 - x1)
+    altura_face = max(1, y2 - y1)
+    escala_face = (
+        (largura_face * altura_face) / max(1, frame.shape[0] * frame.shape[1])
+    ) ** 0.5
 
     face_score = float(getattr(face, "det_score", 0.0) or 0.0)
     qualidade_face = limitar((face_score - 0.55) / 0.40)
@@ -167,6 +279,7 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
     tela_score = 0.0
     foto_score = 0.0
     suporte_plano = calcular_suporte_plano(frame, bbox)
+    pad_model = inferir_modelo_pad(frame, bbox)
 
     if rosto_recortado.size > 0:
         hsv = cv2.cvtColor(rosto_recortado, cv2.COLOR_BGR2HSV)
@@ -225,6 +338,8 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
         "foto_score": foto_score,
         "tela_score": tela_score,
         "suporte_plano": suporte_plano,
+        "escala_face": float(escala_face),
+        **pad_model,
         "variacao_profundidade": float(variacao_profundidade),
         "media_saturacao": media_saturacao,
         "media_brilho": media_brilho,
@@ -274,6 +389,11 @@ def obter_track_id(bbox, frame_atual, tracks_usados):
             "foto_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "tela_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "flat_support_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "face_scales": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "pad_model_live_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "pad_model_print_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "pad_model_replay_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
+            "pad_model_attack_scores": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "centers": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "areas": deque(maxlen=TEMPORAL_WINDOW_SIZE),
             "depth_values": deque(maxlen=TEMPORAL_WINDOW_SIZE),
@@ -286,28 +406,16 @@ def obter_track_id(bbox, frame_atual, tracks_usados):
 
 
 def calcular_movimento_temporal(track):
-    centers = list(track["centers"])
-    areas = list(track["areas"])
     depths = list(track["depth_values"])
     eyes = list(track["eye_aspects"])
-    if len(centers) < TEMPORAL_MIN_FRAMES:
+    if len(depths) < TEMPORAL_MIN_FRAMES:
         return 0.0
 
-    deslocamentos = [
-        np.linalg.norm(np.array(centers[i]) - np.array(centers[i - 1]))
-        for i in range(1, len(centers))
-    ]
-    area_media = max(sum(areas) / len(areas), 1.0)
-    escala_face = area_media ** 0.5
-    movimento_centro = limitar((sum(deslocamentos) / len(deslocamentos)) / (escala_face * 0.035))
-    movimento_area = limitar((max(areas) - min(areas)) / (area_media * 0.12))
-    movimento_profundidade = limitar((max(depths) - min(depths)) / 8.0) if depths else 0.0
+    movimento_profundidade = limitar((max(depths) - min(depths)) / 10.0) if depths else 0.0
     movimento_olhos = limitar((max(eyes) - min(eyes)) / 0.08) if eyes else 0.0
     return limitar(
-        (movimento_centro * 0.35)
-        + (movimento_area * 0.20)
-        + (movimento_profundidade * 0.25)
-        + (movimento_olhos * 0.20)
+        (movimento_profundidade * 0.55)
+        + (movimento_olhos * 0.45)
     )
 
 
@@ -342,25 +450,55 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     track["tela_scores"].append(float(evidencias["tela_score"]))
     track.setdefault("flat_support_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
     track["flat_support_scores"].append(float(evidencias["suporte_plano"]))
+    track.setdefault("face_scales", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track["face_scales"].append(float(evidencias["escala_face"]))
+    track.setdefault("pad_model_live_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("pad_model_print_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("pad_model_replay_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track.setdefault("pad_model_attack_scores", deque(maxlen=TEMPORAL_WINDOW_SIZE))
+    track["pad_model_live_scores"].append(float(evidencias["pad_model_live"]))
+    track["pad_model_print_scores"].append(float(evidencias["pad_model_print"]))
+    track["pad_model_replay_scores"].append(float(evidencias["pad_model_replay"]))
+    track["pad_model_attack_scores"].append(float(evidencias["pad_model_attack"]))
     track["centers"].append(center)
     track["areas"].append(float(area))
     track["depth_values"].append(float(evidencias["variacao_profundidade"]))
     track["eye_aspects"].append(float(evidencias["eye_aspect_ratio"]))
 
     movimento_natural = calcular_movimento_temporal(track)
+    contexto_apresentacao = (
+        evidencias["suporte_plano"] >= 0.25
+        or evidencias["foto_score"] >= 0.45
+        or evidencias["tela_score"] >= 0.45
+        or evidencias["escala_face"] < PAD_MIN_REAL_FACE_SCALE
+    )
+    ataque_modelo_ponderado = (
+        evidencias["pad_model_attack"] if contexto_apresentacao else 0.0
+    )
     ataque_visual = max(
         evidencias["foto_score"],
         evidencias["tela_score"],
         evidencias["suporte_plano"],
+        ataque_modelo_ponderado,
     )
-    anti_spoof_instantaneo = limitar(
-        (evidencias["profundidade"] * 0.25)
-        + (evidencias["textura_natural"] * 0.20)
-        + (evidencias["cor_natural"] * 0.15)
-        + (movimento_natural * 0.25)
-        + (evidencias["face_detectada"] * 0.05)
-        + ((1.0 - ataque_visual) * 0.10)
-    )
+    if evidencias["pad_model_usado"]:
+        anti_spoof_instantaneo = limitar(
+            (evidencias["pad_model_live"] * 0.20)
+            + (evidencias["profundidade"] * 0.22)
+            + (evidencias["textura_natural"] * 0.18)
+            + (evidencias["cor_natural"] * 0.12)
+            + (movimento_natural * 0.20)
+            + ((1.0 - ataque_visual) * 0.08)
+        )
+    else:
+        anti_spoof_instantaneo = limitar(
+            (evidencias["profundidade"] * 0.25)
+            + (evidencias["textura_natural"] * 0.20)
+            + (evidencias["cor_natural"] * 0.15)
+            + (movimento_natural * 0.25)
+            + (evidencias["face_detectada"] * 0.05)
+            + ((1.0 - ataque_visual) * 0.10)
+        )
     track["scores"].append(float(anti_spoof_instantaneo))
 
     scores = list(track["scores"])
@@ -372,6 +510,18 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
     foto_media = media_deque(track["foto_scores"])
     tela_media = media_deque(track["tela_scores"])
     suporte_plano_media = media_deque(track["flat_support_scores"])
+    escala_face_media = media_deque(track["face_scales"])
+    pad_live_media = media_deque(track["pad_model_live_scores"])
+    pad_print_media = media_deque(track["pad_model_print_scores"])
+    pad_replay_media = media_deque(track["pad_model_replay_scores"])
+    pad_attack_media = media_deque(track["pad_model_attack_scores"])
+    pad_model_usado = bool(evidencias["pad_model_usado"])
+    contexto_apresentacao_media = (
+        suporte_plano_media >= 0.25
+        or foto_media >= 0.45
+        or tela_media >= 0.45
+        or escala_face_media < PAD_MIN_REAL_FACE_SCALE
+    )
     estabilidade = max(scores) - min(scores) if scores else 1.0
     frames_analisados = len(scores)
     estavel = (
@@ -384,41 +534,68 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
         and cor_media >= 0.35
         and movimento_natural >= PAD_MIN_MOTION_SCORE
         and max(foto_media, tela_media, suporte_plano_media) < PAD_FLAT_SUPPORT_SCORE
+        and escala_face_media >= PAD_MIN_REAL_FACE_SCALE
+        and (
+            not pad_model_usado
+            or (
+                pad_live_media >= 0.30
+                or not contexto_apresentacao_media
+            )
+        )
+    )
+    face_real_grande_com_oclusao = (
+        escala_face_media >= PAD_LARGE_REAL_FACE_SCALE
+        and profundidade_media >= 0.35
+        and textura_media >= 0.30
+        and cor_media >= 0.25
+        and suporte_plano_media < PAD_FLAT_SUPPORT_SCORE
+        and foto_media < 0.80
+        and tela_media < 0.80
+        and score_medio >= 0.35
     )
 
+    label = "SPOOF"
+    tipo_apresentacao = "INCERTO"
+    confianca = calcular_confianca_incerto(score_medio, frames_analisados)
+    cor_borda = (0, 0, 255)
+    cor_interface = "#ef4444"
+
     if not estavel:
-        label = "INCERTO"
-        confianca = calcular_confianca_incerto(score_medio, frames_analisados)
-        cor_borda = (0, 255, 255)
-        cor_interface = "#facc15"
-    elif suporte_plano_media >= PAD_FLAT_SUPPORT_SCORE or foto_media >= PAD_STRONG_ATTACK_SCORE:
-        label = "FOTO"
-        confianca = max(foto_media, suporte_plano_media)
-        cor_borda = (0, 0, 255)
-        cor_interface = "#ef4444"
-    elif tela_media >= PAD_STRONG_ATTACK_SCORE:
-        label = "TELA"
-        confianca = tela_media
-        cor_borda = (0, 0, 255)
-        cor_interface = "#ef4444"
+        tipo_apresentacao = "INCERTO"
     elif score_medio >= PAD_REAL_THRESHOLD and evidencias_suficientes_real:
         label = "REAL"
+        tipo_apresentacao = "PRESENCA_FISICA"
         confianca = score_medio
         cor_borda = (0, 255, 0)
         cor_interface = "#22c55e"
+    elif face_real_grande_com_oclusao:
+        label = "REAL"
+        tipo_apresentacao = "PRESENCA_FISICA_PARCIAL"
+        confianca = limitar(max(score_medio, 0.68))
+        cor_borda = (0, 255, 0)
+        cor_interface = "#22c55e"
+    elif pad_print_media >= PAD_MODEL_ATTACK_THRESHOLD and contexto_apresentacao_media:
+        tipo_apresentacao = "FOTO"
+        confianca = pad_print_media
+    elif pad_replay_media >= PAD_MODEL_ATTACK_THRESHOLD and contexto_apresentacao_media:
+        tipo_apresentacao = "TELA"
+        confianca = pad_replay_media
+    elif suporte_plano_media >= PAD_FLAT_SUPPORT_SCORE or foto_media >= PAD_STRONG_ATTACK_SCORE:
+        tipo_apresentacao = "FOTO"
+        confianca = max(foto_media, suporte_plano_media)
+    elif tela_media >= PAD_STRONG_ATTACK_SCORE:
+        tipo_apresentacao = "TELA"
+        confianca = tela_media
     elif score_medio <= PAD_SPOOF_THRESHOLD:
-        label = "SPOOF"
+        tipo_apresentacao = "SPOOF"
         confianca = 1.0 - score_medio
-        cor_borda = (0, 0, 255)
-        cor_interface = "#ef4444"
     else:
-        label = "INCERTO"
+        tipo_apresentacao = "INCERTO"
         confianca = calcular_confianca_incerto(score_medio, frames_analisados)
-        cor_borda = (0, 255, 255)
-        cor_interface = "#facc15"
 
     return {
         "label": label,
+        "tipo_apresentacao": tipo_apresentacao,
         "confianca": confianca,
         "real_score_medio": score_medio,
         "evidencias": {
@@ -431,6 +608,11 @@ def atualizar_decisao_temporal(track_id, bbox, evidencias, frame_atual):
             "foto_score": foto_media,
             "tela_score": tela_media,
             "suporte_plano": suporte_plano_media,
+            "escala_face": escala_face_media,
+            "pad_model_live": pad_live_media,
+            "pad_model_print": pad_print_media,
+            "pad_model_replay": pad_replay_media,
+            "pad_model_attack": pad_attack_media,
         },
         "frames_analisados": frames_analisados,
         "estabilidade": estabilidade,
@@ -473,6 +655,30 @@ except Exception as e:
     provider_ativo = "CPU"
     model_loaded = True
 
+pad_session = None
+pad_input_name = None
+pad_model_loaded = False
+pad_model_provider = None
+
+if PAD_MODEL_ENABLED:
+    try:
+        if not os.path.exists(PAD_MODEL_PATH):
+            raise FileNotFoundError(f"Modelo PAD nao encontrado: {PAD_MODEL_PATH}")
+
+        pad_providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if provider_ativo == "CUDA"
+            else ["CPUExecutionProvider"]
+        )
+        pad_session = ort.InferenceSession(PAD_MODEL_PATH, providers=pad_providers)
+        pad_input_name = pad_session.get_inputs()[0].name
+        pad_model_provider = pad_session.get_providers()[0]
+        pad_model_loaded = True
+        print(f"[*] Modelo PAD carregado: {PAD_MODEL_PATH}")
+        print(f"[*] Provider PAD ativo: {pad_model_provider}")
+    except Exception as e:
+        print(f"[-] Modelo PAD indisponivel, usando heuristicas: {e}")
+
 
 @app.get("/health")
 async def health():
@@ -482,6 +688,10 @@ async def health():
         "gpu_enabled": provider_ativo == "CUDA",
         "provider_ativo": provider_ativo,
         "model_loaded": model_loaded,
+        "pad_model_enabled": PAD_MODEL_ENABLED,
+        "pad_model_loaded": pad_model_loaded,
+        "pad_model_path": PAD_MODEL_PATH,
+        "pad_model_provider": pad_model_provider,
     }
 
 
@@ -541,12 +751,14 @@ async def predict(
                     "id": track_id,
                     "bbox": bbox,
                     "label": label,
+                    "tipo_apresentacao": decisao_temporal["tipo_apresentacao"],
                     "confianca": round(float(confianca), 3),
                     "score": round(float(confianca), 3),
                     "face_score": round(float(evidencias["face_detectada"]), 3),
                     "anti_spoofing_score": round(
                         float(decisao_temporal["evidencias"]["anti_spoofing"]), 3
                     ),
+                    "pad_model_usado": bool(evidencias["pad_model_usado"]),
                     "real_score_medio": round(
                         float(decisao_temporal["real_score_medio"]), 3
                     ),
@@ -615,6 +827,10 @@ async def predict(
                 "pad_min_motion_score": PAD_MIN_MOTION_SCORE,
                 "pad_strong_attack_score": PAD_STRONG_ATTACK_SCORE,
                 "pad_flat_support_score": PAD_FLAT_SUPPORT_SCORE,
+                "pad_min_real_face_scale": PAD_MIN_REAL_FACE_SCALE,
+                "pad_large_real_face_scale": PAD_LARGE_REAL_FACE_SCALE,
+                "pad_model_real_threshold": PAD_MODEL_REAL_THRESHOLD,
+                "pad_model_attack_threshold": PAD_MODEL_ATTACK_THRESHOLD,
                 "tracks_ativos": len(face_tracks),
             },
             "metricas": {
@@ -680,6 +896,7 @@ async def index():
                 <div class="status-item"><span class="status-label">FPS inferencia</span><span class="status-value" id="fps-inferencia">0</span></div>
                 <div class="status-item"><span class="status-label">Latencia media</span><span class="status-value" id="latencia-media">0 ms</span></div>
                 <div class="status-item"><span class="status-label">Rostos</span><span class="status-value" id="status-rostos">0</span></div>
+                <div class="status-item"><span class="status-label">Tipo provavel</span><span class="status-value" id="tipo-apresentacao">--</span></div>
                 <div class="status-item"><span class="status-label">Provider</span><span class="status-value" id="provider-ativo">--</span></div>
                 <div class="status-item"><span class="status-label">Resolucao</span><span class="status-value" id="resolucao-frame">640x480</span></div>
                 <div class="status-item"><span class="status-label">Camera</span><span class="status-value" id="status-camera">iniciando</span></div>
@@ -697,6 +914,10 @@ async def index():
                 <div class="status-item"><span class="status-label">Movimento natural</span><span class="status-value" id="score-movimento">0%</span></div>
                 <div class="status-item"><span class="status-label">Anti-spoofing</span><span class="status-value" id="score-antispoofing">0%</span></div>
                 <div class="status-item"><span class="status-label">Suporte plano</span><span class="status-value" id="score-suporte-plano">0%</span></div>
+                <div class="status-item"><span class="status-label">Escala da face</span><span class="status-value" id="score-escala-face">0%</span></div>
+                <div class="status-item"><span class="status-label">Modelo live</span><span class="status-value" id="score-modelo-live">0%</span></div>
+                <div class="status-item"><span class="status-label">Modelo print</span><span class="status-value" id="score-modelo-print">0%</span></div>
+                <div class="status-item"><span class="status-label">Modelo replay</span><span class="status-value" id="score-modelo-replay">0%</span></div>
             </div>
         </div>
 
@@ -712,6 +933,7 @@ async def index():
             const fpsInferenciaEl = document.getElementById('fps-inferencia');
             const latenciaMediaEl = document.getElementById('latencia-media');
             const statusRostosEl = document.getElementById('status-rostos');
+            const tipoApresentacaoEl = document.getElementById('tipo-apresentacao');
             const providerAtivoEl = document.getElementById('provider-ativo');
             const resolucaoFrameEl = document.getElementById('resolucao-frame');
             const statusCameraEl = document.getElementById('status-camera');
@@ -729,6 +951,10 @@ async def index():
             const scoreMovimentoEl = document.getElementById('score-movimento');
             const scoreAntispoofingEl = document.getElementById('score-antispoofing');
             const scoreSuportePlanoEl = document.getElementById('score-suporte-plano');
+            const scoreEscalaFaceEl = document.getElementById('score-escala-face');
+            const scoreModeloLiveEl = document.getElementById('score-modelo-live');
+            const scoreModeloPrintEl = document.getElementById('score-modelo-print');
+            const scoreModeloReplayEl = document.getElementById('score-modelo-replay');
 
             let framesCapturados = 0;
             let framesInferidos = 0;
@@ -855,6 +1081,7 @@ async def index():
 
                                     const primeiraFace = (data.faces || [])[0];
                                     if (data.analise_temporal && primeiraFace) {
+                                        tipoApresentacaoEl.textContent = primeiraFace.tipo_apresentacao || "--";
                                         framesTemporaisEl.textContent = `${primeiraFace.frames_analisados}/${data.analise_temporal.min_frames}`;
                                         estabilidadeTemporalEl.textContent = primeiraFace.estavel ? "estavel" : "analisando";
                                         atualizarClasseStatus(estabilidadeTemporalEl, primeiraFace.estavel ? "status-ok" : "status-warn");
@@ -865,8 +1092,13 @@ async def index():
                                             scoreMovimentoEl.textContent = `${(primeiraFace.evidencias.movimento_natural * 100).toFixed(0)}%`;
                                             scoreAntispoofingEl.textContent = `${(primeiraFace.evidencias.anti_spoofing * 100).toFixed(0)}%`;
                                             scoreSuportePlanoEl.textContent = `${(primeiraFace.evidencias.suporte_plano * 100).toFixed(0)}%`;
+                                            scoreEscalaFaceEl.textContent = `${(primeiraFace.evidencias.escala_face * 100).toFixed(0)}%`;
+                                            scoreModeloLiveEl.textContent = `${(primeiraFace.evidencias.pad_model_live * 100).toFixed(0)}%`;
+                                            scoreModeloPrintEl.textContent = `${(primeiraFace.evidencias.pad_model_print * 100).toFixed(0)}%`;
+                                            scoreModeloReplayEl.textContent = `${(primeiraFace.evidencias.pad_model_replay * 100).toFixed(0)}%`;
                                         }
                                     } else if (data.analise_temporal) {
+                                        tipoApresentacaoEl.textContent = "--";
                                         framesTemporaisEl.textContent = `0/${data.analise_temporal.min_frames}`;
                                         estabilidadeTemporalEl.textContent = "--";
                                         atualizarClasseStatus(estabilidadeTemporalEl, "");
@@ -876,6 +1108,10 @@ async def index():
                                         scoreMovimentoEl.textContent = "0%";
                                         scoreAntispoofingEl.textContent = "0%";
                                         scoreSuportePlanoEl.textContent = "0%";
+                                        scoreEscalaFaceEl.textContent = "0%";
+                                        scoreModeloLiveEl.textContent = "0%";
+                                        scoreModeloPrintEl.textContent = "0%";
+                                        scoreModeloReplayEl.textContent = "0%";
                                     }
                                 }
                             })

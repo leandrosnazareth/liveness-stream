@@ -3,9 +3,8 @@
 Este projeto e uma aplicacao de Inteligencia Artificial para deteccao de vivacidade
 (Liveness Detection / Anti-Spoofing) em tempo real. A aplicacao captura o feed da
 webcam pelo navegador, envia frames para uma API FastAPI, detecta multiplos rostos
-com InsightFace e classifica cada rosto com uma decisao de PAD
-(Presentation Attack Detection), como `REAL`, `FOTO`, `TELA`, `SPOOF` ou
-`INCERTO`.
+com InsightFace e classifica cada rosto com uma decisao principal binaria de PAD
+(Presentation Attack Detection): `REAL` ou `SPOOF`.
 
 ## Funcionalidades
 
@@ -14,6 +13,7 @@ com InsightFace e classifica cada rosto com uma decisao de PAD
 - Analise independente por rosto.
 - Analise temporal por face para reduzir oscilacoes entre frames.
 - Fusao de evidencias de profundidade, textura, cor, movimento e sinais de ataque.
+- Modelo dedicado MiniFASNet V2 ONNX para anti-spoofing visual.
 - Scores separados para deteccao facial e anti-spoofing.
 - Uso de InsightFace com ONNXRuntime GPU.
 - Execucao em container Docker com suporte a NVIDIA CUDA/cuDNN.
@@ -25,6 +25,7 @@ com InsightFace e classifica cada rosto com uma decisao de PAD
 - OpenCV
 - InsightFace
 - ONNXRuntime GPU
+- MiniFASNet V2 ONNX para PAD
 - Docker Desktop com WSL2
 - NVIDIA CUDA 11.8 + cuDNN 8
 
@@ -140,8 +141,12 @@ A classificacao final combina:
 
 Para retornar `REAL`, o sistema exige evidencias suficientes de profundidade,
 textura, cor e movimento natural ao longo de varios frames. Quando as evidencias
-sao fracas, conflitantes ou ainda insuficientes, o resultado preferencial e
-`INCERTO`, evitando falso `REAL 100%` apenas por haver um rosto detectado.
+sao fracas, conflitantes ou ainda insuficientes, o resultado principal passa a ser
+`SPOOF`, evitando falso `REAL 100%` apenas por haver um rosto detectado.
+
+O tipo especifico da apresentacao fica em um campo separado de diagnostico:
+`tipo_apresentacao`, podendo indicar `FOTO`, `TELA`, `SPOOF`, `INCERTO` ou
+`PRESENCA_FISICA`.
 
 ## Scores Retornados
 
@@ -149,7 +154,8 @@ Cada face pode retornar campos como:
 
 ```json
 {
-  "label": "FOTO",
+  "label": "SPOOF",
+  "tipo_apresentacao": "FOTO",
   "confianca": 0.91,
   "face_score": 0.99,
   "anti_spoofing_score": 0.12,
@@ -162,7 +168,11 @@ Cada face pode retornar campos como:
     "anti_spoofing": 0.12,
     "foto_score": 0.91,
     "tela_score": 0.22,
-    "suporte_plano": 0.88
+    "suporte_plano": 0.88,
+    "pad_model_live": 0.08,
+    "pad_model_print": 0.89,
+    "pad_model_replay": 0.03,
+    "pad_model_attack": 0.92
   }
 }
 ```
@@ -182,6 +192,9 @@ docker run -d --rm --gpus device=0 -p 8080:8000 `
   -e PAD_MIN_MOTION_SCORE=0.25 `
   -e PAD_STRONG_ATTACK_SCORE=0.62 `
   -e PAD_FLAT_SUPPORT_SCORE=0.48 `
+  -e PAD_MODEL_REAL_THRESHOLD=0.72 `
+  -e PAD_MODEL_ATTACK_THRESHOLD=0.55 `
+  -e PAD_LARGE_REAL_FACE_SCALE=0.30 `
   ia-liveness-api
 ```
 
@@ -190,6 +203,28 @@ decisao `REAL` mais conservadora. Valores menores em `PAD_STRONG_ATTACK_SCORE`
 fazem o sistema marcar `FOTO` ou `TELA` com menos evidencia acumulada.
 Valores menores em `PAD_FLAT_SUPPORT_SCORE` deixam a deteccao de foto impressa
 em folha/cartaz mais sensivel.
+`PAD_LARGE_REAL_FACE_SCALE` permite recuperar um rosto fisico grande parcialmente
+ocluido, evitando que uma folha na frente da boca transforme automaticamente a
+face real em `SPOOF`.
+
+## Modelo Anti-Spoofing Dedicado
+
+Durante o build, o Docker baixa o modelo `minifasnet_v2.onnx` para:
+
+```text
+/app/models/minifasnet_v2.onnx
+```
+
+Esse modelo recebe um crop BGR da face em `80x80` com margem de `2.7x` e retorna
+tres probabilidades:
+
+- `pad_model_live`: probabilidade de face real;
+- `pad_model_print`: probabilidade de ataque por foto impressa;
+- `pad_model_replay`: probabilidade de replay/tela.
+
+Quando o modelo esta carregado, a classificacao `REAL` tambem exige
+`pad_model_live >= PAD_MODEL_REAL_THRESHOLD` e
+`pad_model_attack < PAD_MODEL_ATTACK_THRESHOLD`.
 
 ## Autor
 
