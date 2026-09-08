@@ -86,12 +86,6 @@ Durante o build, o Docker baixa o modelo:
 https://huggingface.co/garciafido/minifasnet-v2-anti-spoofing-onnx
 ```
 
-Arquivo dentro do container:
-
-```text
-/app/models/minifasnet_v2.onnx
-```
-
 ## Endpoints
 
 ```text
