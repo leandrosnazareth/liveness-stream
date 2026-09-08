@@ -92,12 +92,6 @@ Arquivo dentro do container:
 /app/models/minifasnet_v2.onnx
 ```
 
-Origem do modelo:
-
-```text
-https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
-```
-
 ## Endpoints
 
 ```text
