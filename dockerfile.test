@@ -1,0 +1,8 @@
+FROM python:3.10-slim
+WORKDIR /app
+COPY requirements-test.txt .
+RUN pip install --no-cache-dir --disable-pip-version-check -r requirements-test.txt
+COPY liveness_app ./liveness_app
+COPY tests ./tests
+ENV PYTHONDONTWRITEBYTECODE=1
+CMD ["python", "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"]

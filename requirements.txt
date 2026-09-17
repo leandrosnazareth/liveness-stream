@@ -3,5 +3,6 @@ uvicorn
 opencv-python-headless
 numpy<2
 python-multipart
+pillow
 insightface
 onnxruntime-gpu==1.16.3

@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 
+from liveness_app.config import PAD_MIN_REAL_FACE_SCALE
 from liveness_app.core.utils import limitar, normalizar_intervalo
 from liveness_app.models import inferir_modelo_pad
 
@@ -210,7 +211,20 @@ def calcular_evidencias(face, frame, bbox, landmarks, variacao_profundidade):
         + ((1.0 - max(tela_score, foto_score, suporte_plano)) * 0.15)
     )
 
+    # This is capture quality, not evidence of physical depth or identity.
+    qualidade_ok = bool(
+        np.isfinite(landmarks).all()
+        and face_score >= 0.80
+        and largura_face >= 80 and altura_face >= 80
+        and 2 <= x1 < x2 <= frame.shape[1] - 2
+        and 2 <= y1 < y2 <= frame.shape[0] - 2
+        and PAD_MIN_REAL_FACE_SCALE <= escala_face <= 0.80
+        and 40 <= media_brilho <= 220
+        and nitidez >= 35
+    )
+
     return {
+        "qualidade_ok": qualidade_ok,
         "face_detectada": qualidade_face,
         "profundidade": profundidade_score,
         "textura_natural": textura_natural,

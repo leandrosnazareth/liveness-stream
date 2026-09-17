@@ -1,0 +1,14 @@
+{
+  "model_sha256": "d7b3cd9ba8a7ceb13baa8c4720902e27ca3112eff52f926c08804af6b6eecc7b",
+  "input_name": "REPLACE_WITH_VERIFIED_INPUT_NAME",
+  "output_name": "REPLACE_WITH_VERIFIED_OUTPUT_NAME",
+  "classes": ["live", "print", "replay"],
+  "color_order": "BGR",
+  "divisor": 255.0,
+  "crop_scale": 2.7,
+  "crop_mode": "upstream_rect",
+  "output_kind": "logits",
+  "reference_file": "reference.npz",
+  "reference_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "reference_source": "REPLACE_WITH_REVIEWED_UPSTREAM_COMMIT_AND_DATASET_PROVENANCE"
+}

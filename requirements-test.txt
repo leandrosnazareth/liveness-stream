@@ -1,0 +1,7 @@
+numpy<2
+opencv-python-headless<4.12
+pillow
+fastapi
+python-multipart
+httpx
+pytest
